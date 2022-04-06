@@ -1,0 +1,10 @@
+name: kube-ovn
+summary: kube-ovn
+description: kube-ovn
+subordinate: true
+series:
+  - focal
+requires:
+  cni:
+    interface: kubernetes-cni
+    scope: container
