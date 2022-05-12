@@ -267,10 +267,12 @@ class KubeOvnCharm(CharmBase):
         registry = self.model.config["registry"]
         for resource in resources:
             if resource["kind"] in ["Deployment", "DaemonSet", "StatefulSet"]:
-                for container in resource["spec"]["template"]["spec"]["containers"]:
-                    container["image"] = "/".join(
-                        [registry] + container["image"].split("/")[-2:]
-                    )
+                pod_spec = resource["spec"]["template"]["spec"]
+                for container_type in ["containers", "initContainers"]:
+                    for container in pod_spec.get(container_type, []):
+                        container["image"] = "/".join(
+                            [registry] + container["image"].split("/")[-2:]
+                        )
 
     def replace_node_selector(self, resource):
         label = self.model.config["label"]
