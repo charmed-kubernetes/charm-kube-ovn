@@ -1,0 +1,10 @@
+applications:
+  calico: null
+  kubernetes-control-plane:
+    options:
+      allow-privileged: "true"
+  kube-ovn:
+    charm: ./kube-ovn_ubuntu-20.04-amd64.charm
+relations:
+- [kube-ovn:cni, kubernetes-control-plane:cni]
+- [kube-ovn:cni, kubernetes-worker:cni]
