@@ -34,11 +34,11 @@ class KubeOvnCharm(CharmBase):
     def apply_kube_ovn(self):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
         resources = self.load_manifest("kube-ovn.yaml")
-        cidr = self.model.config["cidr"]
-        gateway = self.model.config["gateway"]
+        cidr = self.model.config["default-cidr"]
+        gateway = self.model.config["default-gateway"]
         service_cidr = self.model.config["service-cidr"]
-        pinger_address = self.model.config["pinger-address"]
-        pinger_dns = self.model.config["pinger-dns"]
+        pinger_address = self.model.config["pinger-external-address"]
+        pinger_dns = self.model.config["pinger-external-dns"]
         node_ips = self.get_ovn_node_ips()
 
         self.replace_images(resources)
@@ -133,7 +133,7 @@ class KubeOvnCharm(CharmBase):
 
     def configure_cni_relation(self):
         self.unit.status = MaintenanceStatus("Configuring CNI relation")
-        cidr = self.model.config["cidr"]
+        cidr = self.model.config["default-cidr"]
         for relation in self.model.relations["cni"]:
             relation.data[self.unit]["cidr"] = cidr
             relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.yaml"
@@ -163,7 +163,7 @@ class KubeOvnCharm(CharmBase):
         return container
 
     def get_ovn_node_ips(self):
-        label = self.model.config["label"]
+        label = self.model.config["control-plane-node-label"]
 
         nodes = json.loads(self.kubectl("get", "node", "-l", label, "-o", "json"))[
             "items"
@@ -275,7 +275,7 @@ class KubeOvnCharm(CharmBase):
                         )
 
     def replace_node_selector(self, resource):
-        label = self.model.config["label"]
+        label = self.model.config["control-plane-node-label"]
         label_key, label_value = label.split("=")
 
         node_selector = resource["spec"]["template"]["spec"]["nodeSelector"]

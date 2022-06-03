@@ -1,25 +1,25 @@
 options:
-  cidr:
-    type: string
-    default: "192.168.0.0/16"
-    description: |
-      Pod CIDR
-  gateway:
-    type: string
-    default: "192.168.0.1"
-    description: |
-      Default gateway in the Pod network
-  label:
+  control-plane-node-label:
     type: string
     default: "juju-application=kubernetes-control-plane"
     description: |
-      Node label for selecting nodes to host the OVN control plane.
-  pinger-address:
+      Node label for selecting nodes to host the Kube-OVN control plane.
+  default-cidr:
+    type: string
+    default: "192.168.0.0/16"
+    description: |
+      Default pod CIDR
+  default-gateway:
+    type: string
+    default: "192.168.0.1"
+    description: |
+      Default gateway for the pod network
+  pinger-external-address:
     type: string
     default: "114.114.114.114"
     description: |
       External IP address used by kube-ovn-pinger for connectivity testing.
-  pinger-dns:
+  pinger-external-dns:
     type: string
     default: "alauda.cn"
     description: |
