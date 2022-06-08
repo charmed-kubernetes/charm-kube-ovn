@@ -136,7 +136,7 @@ class KubeOvnCharm(CharmBase):
         cidr = self.model.config["default-cidr"]
         for relation in self.model.relations["cni"]:
             relation.data[self.unit]["cidr"] = cidr
-            relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.yaml"
+            relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.conflist"
 
     def configure_kube_ovn(self):
         if not self.is_kubeconfig_available():
