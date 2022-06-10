@@ -143,16 +143,23 @@ class KubeOvnCharm(CharmBase):
             self.unit.status = WaitingStatus("Waiting for Kubernetes API")
             return
 
-        self.check_if_pod_restart_will_be_needed()
+        try:
+            self.check_if_pod_restart_will_be_needed()
 
-        self.apply_crds()
-        self.apply_ovn()
-        self.apply_kube_ovn()
+            self.apply_crds()
+            self.apply_ovn()
+            self.apply_kube_ovn()
 
-        if self.stored.pod_restart_needed:
-            self.restart_pods()
+            if self.stored.pod_restart_needed:
+                self.restart_pods()
+        except CalledProcessError:
+            # Likely the Kubernetes API is unavailable. Log the exception in
+            # case it it something else, and let the caller know we failed.
+            log.error(traceback.format_exc())
+            return False
 
         self.stored.kube_ovn_configured = True
+        return True
 
     def get_container_resource(self, resource, container_name):
         container = [
@@ -204,14 +211,8 @@ class KubeOvnCharm(CharmBase):
         self.set_active_status()
 
     def on_cni_relation_changed(self, event):
-        try:
-            self.configure_kube_ovn()
-        except CalledProcessError:
-            # Likely the Kubernetes API is unavailable. Log a stack trace
-            # and retry.
-            log.error(traceback.format_exc())
-            self.unit.status = WaitingStatus("Waiting to retry configuring Kube-OVN")
-            event.defer()
+        if not self.configure_kube_ovn():
+            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
             return
 
         self.set_active_status()
@@ -219,14 +220,8 @@ class KubeOvnCharm(CharmBase):
     def on_config_changed(self, event):
         self.configure_cni_relation()
 
-        try:
-            self.configure_kube_ovn()
-        except CalledProcessError:
-            # Likely the Kubernetes API is unavailable. Log a stack trace
-            # and retry.
-            log.error(traceback.format_exc())
-            self.unit.status = WaitingStatus("Waiting to retry configuring Kube-OVN")
-            event.defer()
+        if not self.configure_kube_ovn():
+            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
             return
 
         self.set_active_status()
@@ -309,6 +304,10 @@ class KubeOvnCharm(CharmBase):
                 log.info(f"Deleting pod {pod} in namespace {namespace}")
                 self.kubectl("delete", "po", "-n", namespace, pod, "--ignore-not-found")
         self.stored.pod_restart_needed = False
+
+    def schedule_event_retry(self, event, message):
+        self.unit.status = WaitingStatus(message)
+        event.defer()
 
     def set_active_status(self):
         if self.stored.kube_ovn_configured:
