@@ -1,0 +1,13 @@
+description: Overlay for attaching the current charm
+applications:
+  calico: null
+  kubernetes-control-plane:
+    options:
+      allow-privileged: "true"
+  kube-ovn:
+    charm: {{charm}}
+relations:
+- - kube-ovn:cni
+  - kubernetes-control-plane:cni
+- - kube-ovn:cni
+  - kubernetes-worker:cni
