@@ -7,4 +7,3 @@ htmlcov/
 __pycache__/
 *.py[cod]
 juju-crashdump-*
-regsync
