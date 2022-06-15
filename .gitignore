@@ -1,0 +1,9 @@
+venv/
+build/
+*.charm
+.tox/
+htmlcov/
+.coverage
+__pycache__/
+*.py[cod]
+juju-crashdump-*
