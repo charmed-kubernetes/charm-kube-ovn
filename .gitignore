@@ -3,6 +3,7 @@ build/
 *.charm
 .tox/
 htmlcov/
+templates/rendered/*
 .coverage
 __pycache__/
 *.py[cod]

@@ -697,7 +697,7 @@ spec:
               type: object
               properties:
                 priority:
-                  type: string					# Value in range 0 to 4,294,967,295.
+                  type: string          # Value in range 0 to 4,294,967,295.
   scope: Cluster
   names:
     plural: htbqoses

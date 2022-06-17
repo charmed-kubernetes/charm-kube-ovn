@@ -4,6 +4,7 @@
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
 import unittest.mock as mock
+from pathlib import Path
 
 import pytest
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
@@ -49,6 +50,183 @@ def test_apply_crds(charm, kubectl):
     charm.apply_crds()
     assert charm.unit.status == MaintenanceStatus("Applying CRDs")
     kubectl.assert_called_once_with(charm, "apply", "-f", "templates/crd.yaml")
+
+
+def test_restart_pods(charm, kubectl):
+    charm.stored.pod_restart_needed = True
+    kubectl.side_effect = [
+        '{"items": [{"metadata": {"name": "kube-system"}}]}',
+        '{"items": [{"metadata": {"name": "restartable-pod"},'
+        ' "spec": {"hostNetwork": false}}]}',
+        "",
+    ]
+
+    charm.restart_pods()
+    assert charm.unit.status == MaintenanceStatus("Restarting pods")
+    assert charm.stored.pod_restart_needed is False
+    kubectl.assert_has_calls(
+        [
+            mock.call(charm, "get", "ns", "-o", "json"),
+            mock.call(
+                charm,
+                "get",
+                "po",
+                "-n",
+                "kube-system",
+                "--field-selector",
+                "spec.restartPolicy=Always",
+                "-o",
+                "json",
+            ),
+            mock.call(
+                charm,
+                "delete",
+                "po",
+                "-n",
+                "kube-system",
+                "restartable-pod",
+                "--ignore-not-found",
+            ),
+        ]
+    )
+
+
+def test_replace_node_selector(harness, charm):
+    harness.disable_hooks()
+    config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
+    harness.update_config(config_dict)
+    resource = dict(
+        spec=dict(template=dict(spec=dict(nodeSelector={"kube-ovn/role": "deleteMe"})))
+    )
+    charm.replace_node_selector(resource)
+    assert "juju-charm" in resource["spec"]["template"]["spec"]["nodeSelector"]
+    assert "kube-ovn/role" not in resource["spec"]["template"]["spec"]["nodeSelector"]
+
+
+def test_replace_images(harness, charm):
+    harness.disable_hooks()
+    config_dict = {"registry": "rocks.canonical.com:443/cdk"}
+    harness.update_config(config_dict)
+    resources = [
+        dict(
+            kind="Deployment",
+            spec=dict(
+                template=dict(
+                    spec=dict(
+                        containers=[dict(image="mcr.microsoft.com/cool/image:latest")],
+                        initContainers=[
+                            dict(image="mcr.microsoft.com/cooler/image:latest")
+                        ],
+                    )
+                )
+            ),
+        )
+    ]
+    charm.replace_images(resources)
+    pod_spec = resources[0]["spec"]["template"]["spec"]
+    assert (
+        pod_spec["containers"][0]["image"]
+        == "rocks.canonical.com:443/cdk/cool/image:latest"
+    )
+    assert (
+        pod_spec["initContainers"][0]["image"]
+        == "rocks.canonical.com:443/cdk/cooler/image:latest"
+    )
+
+
+def test_replace_container_env_vars(charm):
+    container = dict(env=[dict(name="MY_ENV", value=2)])
+    env_vars = dict(MY_ENV=0)
+    charm.replace_container_env_vars(container, env_vars)
+    assert container["env"][0]["value"] == 0
+
+
+def test_replace_container_args(charm):
+    containers = [
+        dict(args=["--v", "--value-arg=values"]),
+        dict(command=["sleep", "--v", "--value-arg=values"]),
+    ]
+    args = {
+        "--v": None,
+        "--value-arg": "empty",
+    }
+    charm.replace_container_args(containers[0], args)
+    charm.replace_container_args(containers[1], args)
+    assert containers[0]["args"] == ["--v", "--value-arg=empty"]
+    assert containers[1]["command"] == ["sleep", "--v", "--value-arg=empty"]
+
+
+def test_get_container_resource(charm):
+    needle = "right-container"
+    haystack = dict(
+        kind="Deployment",
+        spec=dict(
+            template=dict(
+                spec=dict(
+                    containers=[
+                        dict(name=needle),
+                        dict(name="wrong-container"),
+                    ],
+                )
+            )
+        ),
+    )
+    result = charm.get_container_resource(haystack, needle)
+    assert result["name"] == needle
+
+
+def test_get_resource(charm):
+    kind = "Deployment"
+    needle = "right-container"
+    haystack = [
+        dict(kind=kind, metadata=dict(name=needle)),
+        dict(kind=kind, metadata=dict(name="wrong-resource")),
+        dict(kind="DaemonSet", metadata=dict(name=needle)),
+    ]
+    result = charm.get_resource(haystack, kind, needle)
+    assert result["kind"] == kind and result["metadata"]["name"] == needle
+
+
+def test_is_kubeconfig_available(harness, charm):
+    harness.disable_hooks()
+    rel_id = harness.add_relation("cni", "kubernetes-control-plane")
+    harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
+    assert not charm.is_kubeconfig_available()
+
+    harness.update_relation_data(
+        rel_id, "kubernetes-control-plane/0", {"kubeconfig-hash": 1234}
+    )
+    assert charm.is_kubeconfig_available()
+
+
+def test_load_manifest(charm):
+    with pytest.raises(FileNotFoundError):
+        charm.load_manifest("bogus.yaml")
+    assert charm.load_manifest("crd.yaml")
+    assert charm.load_manifest("kube-ovn.yaml")
+    assert charm.load_manifest("ovn.yaml")
+
+
+def test_render_manifest(charm):
+    destination = Path(charm.render_manifest({}, "out.yaml"))
+    assert destination.exists()
+    destination.unlink()
+    destination.parent.rmdir()
+
+
+def test_get_ovn_node_ips(harness, charm, kubectl):
+    harness.disable_hooks()
+    config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
+    harness.update_config(config_dict)
+    kubectl.side_effect = [
+        '{"items": [{"status":{"addresses":'
+        '[{"type":"InternalIP","address":"192.168.0.1"}]}}]}',
+    ]
+    result = charm.get_ovn_node_ips()
+    assert result == ["192.168.0.1"]
+    kubectl.assert_called_once_with(
+        charm, "get", "node", "-l", "juju-charm=kubernetes-control-plane", "-o", "json"
+    )
 
 
 @pytest.mark.parametrize(

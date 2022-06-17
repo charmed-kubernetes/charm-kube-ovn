@@ -162,12 +162,20 @@ class KubeOvnCharm(CharmBase):
         return True
 
     def get_container_resource(self, resource, container_name):
-        container = [
-            container
-            for container in resource["spec"]["template"]["spec"]["containers"]
-            if container["name"] == container_name
-        ][0]
-        return container
+        return next(
+            filter(
+                lambda c: c["name"] == container_name,
+                resource["spec"]["template"]["spec"]["containers"],
+            )
+        )
+
+    def get_resource(self, resources, kind, name):
+        return next(
+            filter(
+                lambda c: c["kind"] == kind and c["metadata"]["name"] == name,
+                resources,
+            )
+        )
 
     def get_ovn_node_ips(self):
         label = self.model.config["control-plane-node-label"]
@@ -182,14 +190,6 @@ class KubeOvnCharm(CharmBase):
             if address["type"] == "InternalIP"
         ]
         return node_ips
-
-    def get_resource(self, resources, kind, name):
-        resource = [
-            resource
-            for resource in resources
-            if resource["kind"] == kind and resource["metadata"]["name"] == name
-        ][0]
-        return resource
 
     def is_kubeconfig_available(self):
         for relation in self.model.relations["cni"]:
@@ -243,19 +243,19 @@ class KubeOvnCharm(CharmBase):
                 continue
             key = arg.split("=")[0]
             value = args.get(key)
-            if value:
+            if value is not None:  # allow for non-truthy values
                 container_command[i] = key + "=" + value
         for i, arg in enumerate(container_args):
             key = arg.split("=")[0]
             value = args.get(key)
-            if value:
+            if value is not None:  # allow for non-truthy values
                 container_args[i] = key + "=" + value
 
     def replace_container_env_vars(self, container, env_vars):
         for env_var in container["env"]:
             key = env_var["name"]
             value = env_vars.get(key)
-            if value:
+            if value is not None:  # allow for non-truthy values
                 env_var["value"] = value
 
     def replace_images(self, resources):
