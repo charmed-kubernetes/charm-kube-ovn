@@ -317,15 +317,15 @@ class KubeOvnCharm(CharmBase):
         resource["spec"]["replicas"] = replicas
 
     def wait_for_kube_ovn_cni(self):
-        self.unit.status = MaintenanceStatus("Waiting for kube-ovn-cni")
+        self.unit.status = WaitingStatus("Waiting for kube-ovn-cni")
         self.wait_for_rollout("daemonset/kube-ovn-cni")
 
     def wait_for_kube_ovn_controller(self):
-        self.unit.status = MaintenanceStatus("Waiting for kube-ovn-controller")
+        self.unit.status = WaitingStatus("Waiting for kube-ovn-controller")
         self.wait_for_rollout("deployment/kube-ovn-controller")
 
     def wait_for_ovn_central(self):
-        self.unit.status = MaintenanceStatus("Waiting for ovn-central")
+        self.unit.status = WaitingStatus("Waiting for ovn-central")
         self.wait_for_rollout("deployment/ovn-central")
 
     def wait_for_rollout(self, name, namespace="kube-system", timeout=300):

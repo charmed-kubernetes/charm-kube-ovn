@@ -6,7 +6,7 @@
 import unittest.mock as mock
 
 import pytest
-from ops.model import MaintenanceStatus, WaitingStatus
+from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
 import ops.testing
 
 from charm import KubeOvnCharm
@@ -51,6 +51,32 @@ def test_apply_crds(charm, kubectl):
     kubectl.assert_called_once_with(charm, "apply", "-f", "templates/crd.yaml")
 
 
+@pytest.mark.parametrize(
+    "name, resource",
+    [
+        ("kube-ovn-cni", "daemonset"),
+        ("kube-ovn-controller", "deployment"),
+        ("ovn-central", "deployment"),
+    ],
+)
+def test_wait_for(kubectl, charm, name, resource):
+    method_name = f"wait_for_{name.replace('-','_')}"
+    wait_method = getattr(charm, method_name)
+    wait_method()
+    assert charm.unit.status == WaitingStatus(f"Waiting for {name}")
+    resource_name = f"{resource}/{name}"
+    kubectl.assert_called_once_with(
+        charm,
+        "rollout",
+        "status",
+        "-n",
+        "kube-system",
+        resource_name,
+        "--timeout",
+        "300s",
+    )
+
+
 def test_apply_manifest(charm, kubectl):
     with mock.patch("charm.KubeOvnCharm.render_manifest") as render_manifest:
         charm.apply_manifest("any-manifest", "any-name")
@@ -67,7 +93,7 @@ def test_check_if_pod_restart_will_be_needed(charm, kubectl):
     assert charm.stored.pod_restart_needed is True
 
 
-def test_configure_cni_relation(harness, charm, kubectl):
+def test_configure_cni_relation(harness, charm):
     harness.disable_hooks()
     config_dict = {"default-cidr": "172.22.0.0/16"}
     harness.update_config(config_dict)
@@ -84,11 +110,39 @@ def test_configure_cni_relation(harness, charm, kubectl):
     }
 
 
+@mock.patch("charm.KubeOvnCharm.configure_cni_relation")
+@mock.patch("charm.KubeOvnCharm.set_active_status")
+def test_join_cni_relation(set_active_status, configure_cni_relation, harness, charm):
+    rel_id = harness.add_relation("cni", "kubernetes-control-plane")
+    harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
+    set_active_status.assert_called_once_with()
+    configure_cni_relation.assert_called_once_with()
+
+
+@pytest.mark.parametrize("kubconfig_ready", (True, False))
+@mock.patch("charm.KubeOvnCharm.configure_cni_relation", mock.MagicMock())
+@mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
+def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm):
+    rel_id = harness.add_relation("cni", "kubernetes-control-plane")
+    harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
+    configure_kube_ovn.return_value = kubconfig_ready
+    charm.stored.kube_ovn_configured = kubconfig_ready
+    harness.update_relation_data(rel_id, "kubernetes-control-plane/0", {"key": "val"})
+
+    configure_kube_ovn.assert_called_once_with()
+
+    if kubconfig_ready:
+        assert charm.unit.status == ActiveStatus()
+    else:
+        assert charm.unit.status == WaitingStatus(
+            "Waiting to retry configuring Kube-OVN"
+        )
+
+
 @mock.patch("charm.KubeOvnCharm.load_manifest")
 @mock.patch("charm.KubeOvnCharm.get_ovn_node_ips")
 @mock.patch("charm.KubeOvnCharm.get_resource")
 @mock.patch("charm.KubeOvnCharm.get_container_resource")
-@mock.patch("charm.KubeOvnCharm.set_replicas")
 @mock.patch("charm.KubeOvnCharm.replace_images")
 @mock.patch("charm.KubeOvnCharm.replace_node_selector")
 @mock.patch("charm.KubeOvnCharm.replace_container_args")
@@ -102,7 +156,6 @@ def test_apply_kube_ovn(
     replace_container_args,
     replace_node_selector,
     replace_images,
-    set_replicas,
     get_container_resource,
     get_resource,
     get_ovn_node_ips,
@@ -130,7 +183,7 @@ def test_apply_kube_ovn(
         mock.MagicMock(),
         mock.MagicMock(),
         mock.MagicMock(),
-        mock.MagicMock(),
+        dict(spec=dict(replicas=None)),
     ]
 
     (
@@ -197,7 +250,7 @@ def test_apply_kube_ovn(
     )
 
     replace_node_selector.assert_called_once_with(kube_ovn_monitor)
-    set_replicas.assert_called_once_with(kube_ovn_monitor, len(node_ips))
+    assert kube_ovn_monitor["spec"]["replicas"] == len(node_ips)
 
     apply_manifest.assert_called_once_with(resources, "kube-ovn.yaml")
     wait_for_kube_ovn_controller.assert_called_once_with()
@@ -208,7 +261,6 @@ def test_apply_kube_ovn(
 @mock.patch("charm.KubeOvnCharm.get_ovn_node_ips")
 @mock.patch("charm.KubeOvnCharm.get_resource")
 @mock.patch("charm.KubeOvnCharm.get_container_resource")
-@mock.patch("charm.KubeOvnCharm.set_replicas")
 @mock.patch("charm.KubeOvnCharm.replace_images")
 @mock.patch("charm.KubeOvnCharm.replace_node_selector")
 @mock.patch("charm.KubeOvnCharm.replace_container_env_vars")
@@ -220,7 +272,6 @@ def test_apply_ovn(
     replace_container_env_vars,
     replace_node_selector,
     replace_images,
-    set_replicas,
     get_container_resource,
     get_resource,
     get_ovn_node_ips,
@@ -228,6 +279,7 @@ def test_apply_ovn(
     charm,
 ):
     node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
+    ovn_central = get_resource.return_value = dict(spec=dict(replicas=None))
     charm.apply_ovn()  # Heavy mocking here suggests perhaps a refactor.
 
     assert charm.unit.status == MaintenanceStatus("Applying OVN resources")
@@ -240,10 +292,9 @@ def test_apply_ovn(
     get_resource.assert_called_once_with(
         resources, kind="Deployment", name="ovn-central"
     )
-    ovn_central = get_resource.return_value
 
     replace_node_selector.assert_called_once_with(ovn_central)
-    set_replicas.assert_called_once_with(ovn_central, len(node_ips))
+    assert ovn_central["spec"]["replicas"] == len(node_ips)
 
     get_container_resource.assert_called_once_with(
         ovn_central, container_name="ovn-central"
