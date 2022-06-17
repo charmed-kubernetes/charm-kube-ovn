@@ -83,7 +83,7 @@ class KubeOvnCharm(CharmBase):
             resources, kind="Deployment", name="kube-ovn-monitor"
         )
         self.replace_node_selector(kube_ovn_monitor)
-        self.set_replicas(kube_ovn_monitor, replicas=len(node_ips))
+        self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
         self.wait_for_kube_ovn_controller()
