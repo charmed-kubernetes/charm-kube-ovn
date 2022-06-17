@@ -335,4 +335,4 @@ class KubeOvnCharm(CharmBase):
 
 
 if __name__ == "__main__":
-    main(KubeOvnCharm)
+    main(KubeOvnCharm)  # pragma: no cover

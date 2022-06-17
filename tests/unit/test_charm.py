@@ -3,6 +3,7 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
+from subprocess import CalledProcessError
 import unittest.mock as mock
 from pathlib import Path
 
@@ -44,6 +45,16 @@ def test_kubectl(mock_check_output, charm):
     mock_check_output.assert_called_with(
         ["kubectl", "--kubeconfig", "/root/.kube/config", "arg1", "arg2"]
     )
+
+
+@mock.patch("charm.KubeOvnCharm.configure_cni_relation", mock.MagicMock())
+@mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
+def test_config_change(configure_kube_ovn, charm, harness):
+    configure_kube_ovn.return_value = True
+    charm.stored.kube_ovn_configured = True
+    config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
+    harness.update_config(config_dict)
+    assert charm.unit.status == ActiveStatus()
 
 
 def test_apply_crds(charm, kubectl):
@@ -315,6 +326,38 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
         assert charm.unit.status == WaitingStatus(
             "Waiting to retry configuring Kube-OVN"
         )
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available")
+@mock.patch("charm.KubeOvnCharm.check_if_pod_restart_will_be_needed")
+@mock.patch("charm.KubeOvnCharm.apply_crds")
+@mock.patch("charm.KubeOvnCharm.apply_ovn")
+@mock.patch("charm.KubeOvnCharm.apply_kube_ovn")
+@mock.patch("charm.KubeOvnCharm.restart_pods")
+def test_configure_kube_ovn(
+    restart_pods,
+    apply_kube_ovn,
+    apply_ovn,
+    apply_crds,
+    check_if_pod_restart_will_be_needed,
+    is_kubeconfig_available,
+    charm,
+):
+    charm.stored.pod_restart_needed = True
+    is_kubeconfig_available.return_value = True
+    assert not charm.stored.kube_ovn_configured
+
+    assert charm.configure_kube_ovn()
+
+    check_if_pod_restart_will_be_needed.assert_called_once_with()
+    apply_crds.assert_called_once_with()
+    apply_ovn.assert_called_once_with()
+    apply_kube_ovn.assert_called_once_with()
+    restart_pods.assert_called_once_with()
+    assert charm.stored.kube_ovn_configured
+
+    apply_crds.side_effect = CalledProcessError(1, "kubectl", stderr="kubectl failure")
+    assert not charm.configure_kube_ovn()
 
 
 @mock.patch("charm.KubeOvnCharm.load_manifest")
