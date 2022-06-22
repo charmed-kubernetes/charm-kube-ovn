@@ -96,7 +96,7 @@ class KubeOvnCharm(CharmBase):
             resources, kind="Deployment", name="kube-ovn-monitor"
         )
         self.replace_node_selector(kube_ovn_monitor)
-        self.set_replicas(kube_ovn_monitor, replicas=len(node_ips))
+        self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
         self.wait_for_kube_ovn_controller()
@@ -187,12 +187,20 @@ class KubeOvnCharm(CharmBase):
             raise e
 
     def get_container_resource(self, resource, container_name):
-        container = [
-            container
-            for container in resource["spec"]["template"]["spec"]["containers"]
-            if container["name"] == container_name
-        ][0]
-        return container
+        return next(
+            filter(
+                lambda c: c["name"] == container_name,
+                resource["spec"]["template"]["spec"]["containers"],
+            )
+        )
+
+    def get_resource(self, resources, kind, name):
+        return next(
+            filter(
+                lambda c: c["kind"] == kind and c["metadata"]["name"] == name,
+                resources,
+            )
+        )
 
     def get_ovn_node_ips(self):
         label = self.model.config["control-plane-node-label"]
@@ -207,14 +215,6 @@ class KubeOvnCharm(CharmBase):
             if address["type"] == "InternalIP"
         ]
         return node_ips
-
-    def get_resource(self, resources, kind, name):
-        resource = [
-            resource
-            for resource in resources
-            if resource["kind"] == kind and resource["metadata"]["name"] == name
-        ][0]
-        return resource
 
     def install_kubectl_plugin(self, plugin_name):
         try:
@@ -298,19 +298,19 @@ class KubeOvnCharm(CharmBase):
                 continue
             key = arg.split("=")[0]
             value = args.get(key)
-            if value:
+            if value is not None:  # allow for non-truthy values
                 container_command[i] = key + "=" + value
         for i, arg in enumerate(container_args):
             key = arg.split("=")[0]
             value = args.get(key)
-            if value:
+            if value is not None:  # allow for non-truthy values
                 container_args[i] = key + "=" + value
 
     def replace_container_env_vars(self, container, env_vars):
         for env_var in container["env"]:
             key = env_var["name"]
             value = env_vars.get(key)
-            if value:
+            if value is not None:  # allow for non-truthy values
                 env_var["value"] = value
 
     def replace_images(self, resources):
@@ -372,15 +372,15 @@ class KubeOvnCharm(CharmBase):
         resource["spec"]["replicas"] = replicas
 
     def wait_for_kube_ovn_cni(self):
-        self.unit.status = MaintenanceStatus("Waiting for kube-ovn-cni")
+        self.unit.status = WaitingStatus("Waiting for kube-ovn-cni")
         self.wait_for_rollout("daemonset/kube-ovn-cni")
 
     def wait_for_kube_ovn_controller(self):
-        self.unit.status = MaintenanceStatus("Waiting for kube-ovn-controller")
+        self.unit.status = WaitingStatus("Waiting for kube-ovn-controller")
         self.wait_for_rollout("deployment/kube-ovn-controller")
 
     def wait_for_ovn_central(self):
-        self.unit.status = MaintenanceStatus("Waiting for ovn-central")
+        self.unit.status = WaitingStatus("Waiting for ovn-central")
         self.wait_for_rollout("deployment/ovn-central")
 
     def wait_for_rollout(self, name, namespace="kube-system", timeout=300):
@@ -390,4 +390,4 @@ class KubeOvnCharm(CharmBase):
 
 
 if __name__ == "__main__":
-    main(KubeOvnCharm)
+    main(KubeOvnCharm)  # pragma: no cover
