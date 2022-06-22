@@ -225,7 +225,7 @@ class KubeOvnCharm(CharmBase):
         except (ModelError, NameError) as e:
             log.error(f"Failed to install plugin {plugin_name}")
             log.error(e)
-        except IOError as e:
+        except OSError as e:
             log.error(f"Failed to copy plugin {plugin_name}")
             log.error(e)
 

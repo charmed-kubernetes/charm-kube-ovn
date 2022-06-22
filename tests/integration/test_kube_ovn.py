@@ -41,3 +41,16 @@ async def test_build_and_deploy(ops_test: OpsTest):
     )
 
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 60)
+
+
+@pytest.mark.abort_on_fail
+async def test_kubectl_ko_plugin(ops_test: OpsTest):
+    units = ops_test.model.applications["kube-ovn"].units
+    machines = [u.machine.entity_id for u in units]
+
+    for m in machines:
+        cmd = f"juju ssh {m} kubectl ko nbctl show"
+        rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+        assert (
+            rc == 0
+        ), f"Failed to execute kubectl-ko on machine:{m} {(stderr or stdout).strip()}"
