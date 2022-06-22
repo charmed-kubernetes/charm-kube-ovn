@@ -24,8 +24,6 @@ async def test_build_and_deploy(ops_test: OpsTest):
     bundle, *overlays = await ops_test.async_render_bundles(
         *overlays, charm=charm, plugin=plugin_path
     )
-    log.info(bundle)
-    log.info(overlays)
 
     log.info("Deploy charm...")
     model = ops_test.model_full_name
