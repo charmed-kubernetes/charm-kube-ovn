@@ -3,15 +3,25 @@
 import json
 import logging
 import os
+import shutil
 import traceback
 import yaml
+
+from pathlib import Path
 from subprocess import CalledProcessError, check_output
 from ops.charm import CharmBase
 from ops.framework import StoredState
 from ops.main import main
-from ops.model import ActiveStatus, WaitingStatus, MaintenanceStatus
+from ops.model import (
+    ActiveStatus,
+    WaitingStatus,
+    MaintenanceStatus,
+    ModelError,
+)
 
 log = logging.getLogger(__name__)
+
+PLUGINS_PATH = "/usr/local/bin"
 
 
 class KubeOvnCharm(CharmBase):
@@ -26,6 +36,9 @@ class KubeOvnCharm(CharmBase):
         )
         self.framework.observe(self.on.cni_relation_joined, self.on_cni_relation_joined)
         self.framework.observe(self.on.config_changed, self.on_config_changed)
+        self.framework.observe(self.on.install, self.on_install)
+        self.framework.observe(self.on.remove, self.on_remove)
+        self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
 
     def apply_crds(self):
         self.unit.status = MaintenanceStatus("Applying CRDs")
@@ -161,6 +174,18 @@ class KubeOvnCharm(CharmBase):
         self.stored.kube_ovn_configured = True
         return True
 
+    def get_charm_resource_path(self, resource_name):
+        try:
+            return self.model.resources.fetch(resource_name)
+        except ModelError as e:
+            log.error(
+                f"Something went wrong when claiming the {resource_name} resource."
+            )
+            raise e
+        except NameError as e:
+            log.error(f"Resource {resource_name} not found on the charm")
+            raise e
+
     def get_container_resource(self, resource, container_name):
         return next(
             filter(
@@ -190,6 +215,19 @@ class KubeOvnCharm(CharmBase):
             if address["type"] == "InternalIP"
         ]
         return node_ips
+
+    def install_kubectl_plugin(self, plugin_name):
+        try:
+            resource_path = self.get_charm_resource_path(plugin_name)
+            plugin_path = Path(PLUGINS_PATH) / plugin_name
+            shutil.copy(resource_path, plugin_path)
+            os.chmod(plugin_path, 0o755)
+        except (ModelError, NameError) as e:
+            log.error(f"Failed to install plugin {plugin_name}")
+            log.error(e)
+        except OSError as e:
+            log.error(f"Failed to copy plugin {plugin_name}")
+            log.error(e)
 
     def is_kubeconfig_available(self):
         for relation in self.model.relations["cni"]:
@@ -225,6 +263,23 @@ class KubeOvnCharm(CharmBase):
             return
 
         self.set_active_status()
+
+    def on_install(self, _):
+        self.install_kubectl_plugin("kubectl-ko")
+
+    def on_remove(self, _):
+        self.remove_kubectl_plugin("kubectl-ko")
+
+    def on_upgrade_charm(self, _):
+        self.install_kubectl_plugin("kubectl-ko")
+
+    def remove_kubectl_plugin(self, plugin_name):
+        try:
+            plugin_path = Path(PLUGINS_PATH) / plugin_name
+            os.remove(plugin_path)
+        except OSError as e:
+            log.error(f"Failed to remove plugin: {plugin_name}")
+            log.error(e)
 
     def render_manifest(self, manifest, name):
         os.makedirs("templates/rendered", exist_ok=True)

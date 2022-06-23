@@ -6,6 +6,8 @@ applications:
       allow-privileged: "true"
   kube-ovn:
     charm: {{charm}}
+    resources:
+      kubectl-ko: {{plugin}}
 relations:
 - - kube-ovn:cni
   - kubernetes-control-plane:cni

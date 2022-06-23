@@ -8,3 +8,9 @@ requires:
   cni:
     interface: kubernetes-cni
     scope: container
+resources:
+  kubectl-ko:
+    type: file
+    filename: kubectl-ko
+    description: |
+      kubectl plugin to help better diagnose container network.

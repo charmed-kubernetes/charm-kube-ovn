@@ -6,9 +6,10 @@
 from subprocess import CalledProcessError
 import unittest.mock as mock
 from pathlib import Path
+from contextlib import ExitStack as does_not_raise
 
 import pytest
-from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
+from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
 
 from charm import KubeOvnCharm
@@ -527,3 +528,117 @@ def test_apply_ovn(
     )
     apply_manifest.assert_called_once_with(resources, "ovn.yaml")
     wait_for_ovn_central.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "resource_name,content,expected_resource,exception",
+    [
+        pytest.param(
+            "kubectl-ko",
+            "Some content",
+            "kubectl-ko",
+            does_not_raise(),
+            id="Resource found",
+        ),
+        pytest.param(
+            "kubectl-ko",
+            "Some content",
+            "another-resource",
+            pytest.raises(NameError),
+            id="Resource not found",
+        ),
+    ],
+)
+def test_get_charm_resource_path(
+    charm,
+    harness,
+    resource_name,
+    expected_resource,
+    content,
+    exception,
+):
+    harness.add_resource(resource_name, content)
+    with exception:
+        charm.get_charm_resource_path(expected_resource)
+
+
+@mock.patch("charm.KubeOvnCharm.get_charm_resource_path")
+@mock.patch("charm.shutil.copy")
+@mock.patch("charm.os.chmod")
+def test_install_kubectl_plugin(mock_chmod, mock_copy, mock_get_resource, charm):
+    plugin_name = "test_plugin"
+    src_path = Path("/home/test") / plugin_name
+    dst_path = Path("/usr/local/bin") / plugin_name
+    mock_get_resource.return_value = src_path
+
+    charm.install_kubectl_plugin(plugin_name)
+
+    mock_copy.assert_called_once_with(src_path, dst_path)
+    mock_chmod.assert_called_once_with(dst_path, 0o755)
+
+
+@pytest.mark.parametrize(
+    "path,exception,log_message",
+    [
+        pytest.param(
+            None, ModelError, "Failed to install plugin", id="Resource not available"
+        ),
+        pytest.param(
+            None, NameError, "Failed to install plugin", id="Resource not found"
+        ),
+        pytest.param(
+            "/home/test/plugin",
+            OSError,
+            "Failed to copy plugin",
+            id="Failed to access location",
+        ),
+    ],
+)
+@mock.patch("charm.KubeOvnCharm.get_charm_resource_path")
+@mock.patch("charm.shutil.copy", mock.MagicMock())
+@mock.patch("charm.os.chmod", mock.MagicMock())
+def test_install_kubectl_plugin_raises(
+    mock_get_resource, path, exception, log_message, charm, caplog
+):
+    mock_get_resource.side_effect = exception
+    mock_get_resource.return_value = path
+
+    charm.install_kubectl_plugin("test_plugin")
+
+    assert log_message in caplog.text
+
+
+@mock.patch("charm.os.remove")
+def test_remove_kubectl_plugin(mock_remove, charm):
+    plugin_name = "test_plugin"
+    path = Path("/usr/local/bin") / plugin_name
+
+    charm.remove_kubectl_plugin(plugin_name)
+
+    mock_remove.assert_called_once_with(path)
+
+
+@mock.patch("charm.os.remove")
+def test_remove_kubectl_plugin_raises(mock_remove, charm, caplog):
+    mock_remove.side_effect = OSError
+    charm.remove_kubectl_plugin("test_plugin")
+
+    assert "Failed to remove plugin" in caplog.text
+
+
+@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
+def test_on_install(mock_install, charm, harness):
+    charm.on_install("mock_event")
+    mock_install.assert_called_once_with("kubectl-ko")
+
+
+@mock.patch("charm.KubeOvnCharm.remove_kubectl_plugin")
+def test_on_remove(mock_remove, charm, harness):
+    charm.on_remove("mock_event")
+    mock_remove.assert_called_once_with("kubectl-ko")
+
+
+@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
+def test_on_upgrade(mock_install, charm, harness):
+    charm.on_upgrade_charm("mock_event")
+    mock_install.assert_called_once_with("kubectl-ko")
