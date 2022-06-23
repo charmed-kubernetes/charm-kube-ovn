@@ -16,12 +16,12 @@ options:
       Default gateway for the pod network
   pinger-external-address:
     type: string
-    default: "114.114.114.114"
+    default: "8.8.8.8"
     description: |
       External IP address used by kube-ovn-pinger for connectivity testing.
   pinger-external-dns:
     type: string
-    default: "alauda.cn"
+    default: "google.com"
     description: |
       External DNS hostname used by kube-ovn-pinger for connectivity testing.
   registry:
