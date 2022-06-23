@@ -41,7 +41,6 @@ async def test_build_and_deploy(ops_test: OpsTest):
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 60)
 
 
-@pytest.mark.abort_on_fail
 async def test_kubectl_ko_plugin(ops_test: OpsTest):
     units = ops_test.model.applications["kube-ovn"].units
     machines = [u.machine.entity_id for u in units]
