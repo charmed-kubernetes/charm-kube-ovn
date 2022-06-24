@@ -360,6 +360,21 @@ def test_configure_kube_ovn(
     assert not charm.configure_kube_ovn()
 
 
+def test_add_container_args(charm):
+    containers = [
+        dict(args=["--arg0=val0"]),
+        dict(command=["command", "-a"]),
+    ]
+    args = {
+        "--arg1": "val1",
+        "--arg2": "val2",
+    }
+    charm.add_container_args(containers[0], args)
+    charm.add_container_args(containers[1], args, True)
+    assert containers[0]["args"] == ["--arg0=val0", "--arg1=val1", "--arg2=val2"]
+    assert containers[1]["command"] == ["command", "-a", "--arg1=val1", "--arg2=val2"]
+
+
 @mock.patch("charm.KubeOvnCharm.load_manifest")
 @mock.patch("charm.KubeOvnCharm.get_ovn_node_ips")
 @mock.patch("charm.KubeOvnCharm.get_resource")
@@ -367,6 +382,7 @@ def test_configure_kube_ovn(
 @mock.patch("charm.KubeOvnCharm.replace_images")
 @mock.patch("charm.KubeOvnCharm.replace_node_selector")
 @mock.patch("charm.KubeOvnCharm.replace_container_args")
+@mock.patch("charm.KubeOvnCharm.add_container_args")
 @mock.patch("charm.KubeOvnCharm.apply_manifest")
 @mock.patch("charm.KubeOvnCharm.wait_for_kube_ovn_controller")
 @mock.patch("charm.KubeOvnCharm.wait_for_kube_ovn_cni")
@@ -374,6 +390,7 @@ def test_apply_kube_ovn(
     wait_for_kube_ovn_cni,
     wait_for_kube_ovn_controller,
     apply_manifest,
+    add_container_args,
     replace_container_args,
     replace_node_selector,
     replace_images,
@@ -392,6 +409,8 @@ def test_apply_kube_ovn(
         "service-cidr": "10.152.183.0/24",
         "pinger-external-address": "10.152.183.1",
         "pinger-external-dns": "1.1.1.1",
+        "node-switch-cidr": "100.64.0.0/16",
+        "node-switch-gateway": "100.64.0.1",
     }
     harness.update_config(config_dict)
     node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
@@ -454,6 +473,7 @@ def test_apply_kube_ovn(
                     "--default-cidr": config_dict["default-cidr"],
                     "--default-gateway": config_dict["default-gateway"],
                     "--service-cluster-ip-range": config_dict["service-cidr"],
+                    "--node-switch-cidr": config_dict["node-switch-cidr"],
                 },
             ),
             mock.call(
@@ -468,6 +488,13 @@ def test_apply_kube_ovn(
                 },
             ),
         ]
+    )
+
+    add_container_args.called_once_with(
+        mock.call(
+            kube_ovn_controller_container,
+            args={"--node-switch-gateway": config_dict["node-switch-gateway"]},
+        )
     )
 
     replace_node_selector.assert_called_once_with(kube_ovn_monitor)
