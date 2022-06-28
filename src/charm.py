@@ -314,7 +314,10 @@ class KubeOvnCharm(CharmBase):
                 env_var["value"] = value
 
     def replace_images(self, resources):
-        registry = self.model.config["registry"]
+        registry = self.model.config["image-registry"]
+        if not registry:
+            registry = self.get_registry_from_relation()
+
         for resource in resources:
             if resource["kind"] in ["Deployment", "DaemonSet", "StatefulSet"]:
                 pod_spec = resource["spec"]["template"]["spec"]
@@ -387,6 +390,9 @@ class KubeOvnCharm(CharmBase):
         self.kubectl(
             "rollout", "status", "-n", namespace, name, "--timeout", str(timeout) + "s"
         )
+
+    def get_registry_from_relation(self):
+        return "rocks.canonical.com:443/cdk"
 
 
 if __name__ == "__main__":

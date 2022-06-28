@@ -117,7 +117,7 @@ def test_replace_node_selector(harness, charm):
 
 def test_replace_images(harness, charm):
     harness.disable_hooks()
-    config_dict = {"registry": "rocks.canonical.com:443/cdk"}
+    config_dict = {"image-registry": "some.registry.com:443/cdk"}
     harness.update_config(config_dict)
     resources = [
         dict(
@@ -138,13 +138,26 @@ def test_replace_images(harness, charm):
     pod_spec = resources[0]["spec"]["template"]["spec"]
     assert (
         pod_spec["containers"][0]["image"]
-        == "rocks.canonical.com:443/cdk/cool/image:latest"
+        == "some.registry.com:443/cdk/cool/image:latest"
     )
     assert (
         pod_spec["initContainers"][0]["image"]
-        == "rocks.canonical.com:443/cdk/cooler/image:latest"
+        == "some.registry.com:443/cdk/cooler/image:latest"
     )
 
+    # Now test the case when the image-registry config is empty
+    config_dict = {"image-registry": ""}
+    harness.update_config(config_dict)
+    charm.replace_images(resources)
+    pod_spec = resources[0]["spec"]["template"]["spec"]
+    assert (
+            pod_spec["containers"][0]["image"]
+            == "rocks.canonical.com:443/cdk/cool/image:latest"
+    )
+    assert (
+            pod_spec["initContainers"][0]["image"]
+            == "rocks.canonical.com:443/cdk/cooler/image:latest"
+    )
 
 def test_replace_container_env_vars(charm):
     container = dict(env=[dict(name="MY_ENV", value=2)])
