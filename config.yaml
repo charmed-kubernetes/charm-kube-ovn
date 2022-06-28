@@ -29,8 +29,3 @@ options:
     default: ""
     description: |
       Image registry for the kube-ovn image.
-  service-cidr:
-    type: string
-    default: "10.152.183.0/24"
-    description: |
-      Service CIDR. This must match the service-cidr config of kubernetes-control-plane.

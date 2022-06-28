@@ -8,6 +8,9 @@ requires:
   cni:
     interface: kubernetes-cni
     scope: container
+peers:
+  kube-ovn:
+    interface: kube-ovn
 resources:
   kubectl-ko:
     type: file
