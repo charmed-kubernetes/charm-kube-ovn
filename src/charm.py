@@ -47,7 +47,7 @@ class KubeOvnCharm(CharmBase):
         self.unit.status = MaintenanceStatus("Applying CRDs")
         self.kubectl("apply", "-f", "templates/crd.yaml")
 
-    def apply_kube_ovn(self, service_cidr):
+    def apply_kube_ovn(self, service_cidr, registry):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
         resources = self.load_manifest("kube-ovn.yaml")
         cidr = self.model.config["default-cidr"]
@@ -56,7 +56,7 @@ class KubeOvnCharm(CharmBase):
         pinger_dns = self.model.config["pinger-external-dns"]
         node_ips = self.get_ovn_node_ips()
 
-        self.replace_images(resources)
+        self.replace_images(resources, registry)
 
         kube_ovn_controller = self.get_resource(
             resources, kind="Deployment", name="kube-ovn-controller"
@@ -108,12 +108,11 @@ class KubeOvnCharm(CharmBase):
         destination = self.render_manifest(manifest, name)
         self.kubectl("apply", "-f", destination)
 
-    def apply_ovn(self):
+    def apply_ovn(self, registry):
         self.unit.status = MaintenanceStatus("Applying OVN resources")
         resources = self.load_manifest("ovn.yaml")
         node_ips = self.get_ovn_node_ips()
-
-        self.replace_images(resources)
+        self.replace_images(resources, registry)
 
         ovn_central = self.get_resource(
             resources, kind="Deployment", name="ovn-central"
@@ -155,7 +154,8 @@ class KubeOvnCharm(CharmBase):
 
     def configure_kube_ovn(self) -> bool:
         service_cidr = self.get_service_cidr()
-        if not self.is_kubeconfig_available() or not service_cidr:
+        registry = self.get_registry()
+        if not self.is_kubeconfig_available() or not service_cidr or not registry:
             self.unit.status = WaitingStatus("Waiting for CNI relation")
             return False
 
@@ -163,8 +163,8 @@ class KubeOvnCharm(CharmBase):
             self.check_if_pod_restart_will_be_needed()
 
             self.apply_crds()
-            self.apply_ovn()
-            self.apply_kube_ovn(service_cidr)
+            self.apply_ovn(registry)
+            self.apply_kube_ovn(service_cidr, registry)
 
             if self.stored.pod_restart_needed:
                 self.restart_pods()
@@ -176,6 +176,12 @@ class KubeOvnCharm(CharmBase):
 
         self.stored.kube_ovn_configured = True
         return True
+
+    def get_registry(self):
+        registry = self.model.config["image-registry"]
+        if not registry:
+            registry = self.get_peer_data_with_key("image-registry")
+        return registry
 
     def get_charm_resource_path(self, resource_name):
         try:
@@ -239,30 +245,23 @@ class KubeOvnCharm(CharmBase):
                     return True
         return False
 
-    def set_service_cidr(self, event):
-        """Repeat received service-cidr from k8s-cp to each kube-ovn unit.
+    def set_peer_data(self, event, cni_data_key, peer_relation_data_key=""):
+        """Repeat received CNI relation data to each kube-ovn unit. The keys for the CNI relation
+        data and peer relation data are assumed to be the same unless otherwise specified.
 
-        service-cidr is received over the cni relation only from
+        CNI relation data is received over the cni relation only from
         kubernetes-control-plane units.  the kube-ovn peer relation
         shares the value around to each kube-ovn unit.
         """
-        cni_service_cidr = event.relation.data[event.unit].get("service-cidr")
-        if cni_service_cidr:
+        if not peer_relation_data_key:
+            peer_relation_data_key = cni_data_key
+        cni_data = event.relation.data[event.unit].get(cni_data_key)
+        if cni_data:
             for relation in self.model.relations["kube-ovn"]:
-                relation.data[self.unit]["service-cidr"] = cni_service_cidr
+                relation.data[self.unit][peer_relation_data_key] = cni_data
 
     def get_service_cidr(self):
-        """Return the agreed service-cidr from each kube-ovn unit including self.
-
-        If there isn't unity in the relation, return None
-        """
-        joined_service_cidr = set()
-        for relation in self.model.relations["kube-ovn"]:
-            for unit in relation.units | {self.unit}:
-                service_cidr = relation.data[unit].get("service-cidr")
-                joined_service_cidr.add(service_cidr)
-        filtered = set(filter(bool, joined_service_cidr))
-        return filtered.pop() if len(filtered) == 1 else None
+        return self.get_peer_data_with_key("service-cidr")
 
     def kubectl(self, *args):
         cmd = ["kubectl", "--kubeconfig", "/root/.kube/config"] + list(args)
@@ -277,7 +276,8 @@ class KubeOvnCharm(CharmBase):
         self.set_active_status()
 
     def on_cni_relation_changed(self, event):
-        self.set_service_cidr(event)
+        self.set_peer_data(event, "service-cidr")
+        self.set_peer_data(event, "image-registry")
 
         if not self.configure_kube_ovn():
             self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
@@ -350,11 +350,7 @@ class KubeOvnCharm(CharmBase):
             if value is not None:  # allow for non-truthy values
                 env_var["value"] = value
 
-    def replace_images(self, resources):
-        registry = self.model.config["image-registry"]
-        if not registry:
-            registry = self.get_registry_from_relation()
-
+    def replace_images(self, resources, registry):
         for resource in resources:
             if resource["kind"] in ["Deployment", "DaemonSet", "StatefulSet"]:
                 pod_spec = resource["spec"]["template"]["spec"]
@@ -428,9 +424,17 @@ class KubeOvnCharm(CharmBase):
             "rollout", "status", "-n", namespace, name, "--timeout", str(timeout) + "s"
         )
 
-    def get_registry_from_relation(self):
-        return "rocks.canonical.com:443/cdk"
-
+    def get_peer_data_with_key(self, data_key):
+        """Return the agreed data associated with the key from each kube-ovn unit including self.
+        If there isn't unity in the relation, return None
+        """
+        joined_data = set()
+        for relation in self.model.relations["kube-ovn"]:
+            for unit in relation.units | {self.unit}:
+                data = relation.data[unit].get(data_key)
+                joined_data.add(data)
+        filtered = set(filter(bool, joined_data))
+        return filtered.pop() if len(filtered) == 1 else None
 
 if __name__ == "__main__":
     main(KubeOvnCharm)  # pragma: no cover
