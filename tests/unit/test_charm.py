@@ -214,19 +214,24 @@ def test_is_kubeconfig_available(harness, charm):
 
 def test_get_service_cidr(harness, charm):
     harness.disable_hooks()
-    rel_id = harness.add_relation("cni", "kubernetes-control-plane")
-    harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
+    rel_id = harness.add_relation("kube-ovn", "kube-ovn")
+    harness.add_relation_unit(rel_id, "kube-ovn/0")
     assert not charm.get_service_cidr()
 
     harness.update_relation_data(
         rel_id,
-        "kubernetes-control-plane/0",
-        {
-            "kubeconfig-hash": 1234,
-            "service-cidr": DEFAULT_SERVICE_CIDR,
-        },
+        "kube-ovn/0",
+        {"service-cidr": DEFAULT_SERVICE_CIDR},
     )
     assert charm.get_service_cidr() == DEFAULT_SERVICE_CIDR
+
+    harness.add_relation_unit(rel_id, "kube-ovn/1")
+    harness.update_relation_data(
+        rel_id,
+        "kube-ovn/1",
+        {"service-cidr": "unspeakable-horror"},
+    )
+    assert charm.get_service_cidr() is None
 
 
 def test_load_manifest(charm):
@@ -335,7 +340,30 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
     harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
     configure_kube_ovn.return_value = kubconfig_ready
     charm.stored.kube_ovn_configured = kubconfig_ready
-    harness.update_relation_data(rel_id, "kubernetes-control-plane/0", {"key": "val"})
+    harness.update_relation_data(
+        rel_id,
+        "kubernetes-control-plane/0",
+        {"key": "val", "service-cidr": DEFAULT_SERVICE_CIDR},
+    )
+
+    configure_kube_ovn.assert_called_once_with()
+
+    if kubconfig_ready:
+        assert charm.unit.status == ActiveStatus()
+    else:
+        assert charm.unit.status == WaitingStatus(
+            "Waiting to retry configuring Kube-OVN"
+        )
+
+
+@pytest.mark.parametrize("kubconfig_ready", (True, False))
+@mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
+def test_change_kube_ovn_relation(configure_kube_ovn, kubconfig_ready, harness, charm):
+    rel_id = harness.add_relation("kube-ovn", "kube-ovn/1")
+    harness.add_relation_unit(rel_id, "kube-ovn/1")
+    configure_kube_ovn.return_value = kubconfig_ready
+    charm.stored.kube_ovn_configured = kubconfig_ready
+    harness.update_relation_data(rel_id, "kube-ovn/1", {"key": "val"})
 
     configure_kube_ovn.assert_called_once_with()
 
