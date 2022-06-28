@@ -249,8 +249,7 @@ class KubeOvnCharm(CharmBase):
         cni_service_cidr = event.relation.data[event.unit].get("service-cidr")
         if cni_service_cidr:
             for relation in self.model.relations["kube-ovn"]:
-                for unit in relation.units | {self.unit}:
-                    relation.data[unit]["service-cidr"] = cni_service_cidr
+                relation.data[self.unit]["service-cidr"] = cni_service_cidr
 
     def get_service_cidr(self):
         """Return the agreed service-cidr from each kube-ovn unit including self.
