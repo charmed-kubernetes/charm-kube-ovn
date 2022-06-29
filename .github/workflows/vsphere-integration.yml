@@ -23,7 +23,6 @@ jobs:
           bootstrap-options: "${{ secrets.FOCAL_BOOTSTRAP_OPTIONS }} --model-default datastore=vsanDatastore --model-default primary-network=VLAN_2763"
       - name: Run test
         run: tox -e integration
-        timeout-minutes: 60
       - name: Setup Debug Artifact Collection
         if: ${{ failure() }}
         run: mkdir tmp
