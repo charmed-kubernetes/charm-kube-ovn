@@ -215,14 +215,14 @@ def test_get_service_cidr(harness, charm):
     harness.disable_hooks()
     rel_id = harness.add_relation("kube-ovn", "kube-ovn")
     harness.add_relation_unit(rel_id, "kube-ovn/0")
-    assert not charm.get_service_cidr()
+    assert not charm.kube_ovn_peer_data("service-cidr")
 
     harness.update_relation_data(
         rel_id,
         "kube-ovn/0",
         {"service-cidr": DEFAULT_SERVICE_CIDR},
     )
-    assert charm.get_service_cidr() == DEFAULT_SERVICE_CIDR
+    assert charm.kube_ovn_peer_data("service-cidr") == DEFAULT_SERVICE_CIDR
 
     harness.add_relation_unit(rel_id, "kube-ovn/1")
     harness.update_relation_data(
@@ -230,7 +230,7 @@ def test_get_service_cidr(harness, charm):
         "kube-ovn/1",
         {"service-cidr": "unspeakable-horror"},
     )
-    assert charm.get_service_cidr() is None
+    assert charm.kube_ovn_peer_data("service-cidr") is None
 
 
 def test_get_registry(harness, charm):
@@ -404,7 +404,7 @@ def test_change_kube_ovn_relation(configure_kube_ovn, kubconfig_ready, harness, 
 
 @mock.patch("charm.KubeOvnCharm.is_kubeconfig_available")
 @mock.patch("charm.KubeOvnCharm.get_registry")
-@mock.patch("charm.KubeOvnCharm.get_service_cidr")
+@mock.patch("charm.KubeOvnCharm.kube_ovn_peer_data")
 @mock.patch("charm.KubeOvnCharm.check_if_pod_restart_will_be_needed")
 @mock.patch("charm.KubeOvnCharm.apply_crds")
 @mock.patch("charm.KubeOvnCharm.apply_ovn")
@@ -416,14 +416,14 @@ def test_configure_kube_ovn(
     apply_ovn,
     apply_crds,
     check_if_pod_restart_will_be_needed,
-    get_service_cidr,
+    kube_ovn_peer_data,
     get_registry,
     is_kubeconfig_available,
     charm,
 ):
     charm.stored.pod_restart_needed = True
     is_kubeconfig_available.return_value = True
-    get_service_cidr.return_value = DEFAULT_SERVICE_CIDR
+    kube_ovn_peer_data.return_value = DEFAULT_SERVICE_CIDR
     get_registry.return_value = DEFAULT_IMAGE_REGISTRY
     assert not charm.stored.kube_ovn_configured
 

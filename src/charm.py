@@ -153,7 +153,7 @@ class KubeOvnCharm(CharmBase):
             relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.conflist"
 
     def configure_kube_ovn(self) -> bool:
-        service_cidr = self.get_service_cidr()
+        service_cidr = self.kube_ovn_peer_data("service-cidr")
         registry = self.get_registry()
         if not self.is_kubeconfig_available() or not service_cidr or not registry:
             self.unit.status = WaitingStatus("Waiting for CNI relation")
@@ -180,7 +180,7 @@ class KubeOvnCharm(CharmBase):
     def get_registry(self):
         registry = self.model.config["image-registry"]
         if not registry:
-            registry = self.get_peer_data_with_key("image-registry")
+            registry = self.kube_ovn_peer_data("image-registry")
         return registry
 
     def get_charm_resource_path(self, resource_name):
@@ -245,24 +245,19 @@ class KubeOvnCharm(CharmBase):
                     return True
         return False
 
-    def set_peer_data(self, event, cni_data_key, peer_relation_data_key=""):
+    def cni_to_kube_ovn(self, event):
         """Repeat received CNI relation data to each kube-ovn unit.
-        The keys for the CNI relation data and peer relation data
-        are assumed to be the same unless otherwise specified.
 
         CNI relation data is received over the cni relation only from
         kubernetes-control-plane units.  the kube-ovn peer relation
         shares the value around to each kube-ovn unit.
         """
-        if not peer_relation_data_key:
-            peer_relation_data_key = cni_data_key
-        cni_data = event.relation.data[event.unit].get(cni_data_key)
-        if cni_data:
+        for key in ["service-cidr", "image-registry"]:
+            cni_data = event.relation.data[event.unit].get(key)
+            if not cni_data:
+                continue
             for relation in self.model.relations["kube-ovn"]:
-                relation.data[self.unit][peer_relation_data_key] = cni_data
-
-    def get_service_cidr(self):
-        return self.get_peer_data_with_key("service-cidr")
+                relation.data[self.unit][key] = cni_data
 
     def kubectl(self, *args):
         cmd = ["kubectl", "--kubeconfig", "/root/.kube/config"] + list(args)
@@ -277,8 +272,7 @@ class KubeOvnCharm(CharmBase):
         self.set_active_status()
 
     def on_cni_relation_changed(self, event):
-        self.set_peer_data(event, "service-cidr")
-        self.set_peer_data(event, "image-registry")
+        self.cni_to_kube_ovn(event)
 
         if not self.configure_kube_ovn():
             self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
@@ -425,7 +419,7 @@ class KubeOvnCharm(CharmBase):
             "rollout", "status", "-n", namespace, name, "--timeout", str(timeout) + "s"
         )
 
-    def get_peer_data_with_key(self, data_key):
+    def kube_ovn_peer_data(self, key):
         """Return the agreed data associated with the key
         from each kube-ovn unit including self.
         If there isn't unity in the relation, return None
@@ -433,7 +427,7 @@ class KubeOvnCharm(CharmBase):
         joined_data = set()
         for relation in self.model.relations["kube-ovn"]:
             for unit in relation.units | {self.unit}:
-                data = relation.data[unit].get(data_key)
+                data = relation.data[unit].get(key)
                 joined_data.add(data)
         filtered = set(filter(bool, joined_data))
         return filtered.pop() if len(filtered) == 1 else None
