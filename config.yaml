@@ -26,12 +26,12 @@ options:
       Gateway for node switch (This value cannot be changed after deployment).
   pinger-external-address:
     type: string
-    default: "114.114.114.114"
+    default: "8.8.8.8"
     description: |
       External IP address used by kube-ovn-pinger for connectivity testing.
   pinger-external-dns:
     type: string
-    default: "alauda.cn"
+    default: "google.com"
     description: |
       External DNS hostname used by kube-ovn-pinger for connectivity testing.
   registry:
@@ -39,8 +39,3 @@ options:
     default: "rocks.canonical.com"
     description: |
       Image registry for the kube-ovn image.
-  service-cidr:
-    type: string
-    default: "10.152.183.0/24"
-    description: |
-      Service CIDR. This must match the service-cidr config of kubernetes-control-plane.

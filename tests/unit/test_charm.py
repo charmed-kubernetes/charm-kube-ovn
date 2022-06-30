@@ -6,14 +6,16 @@
 from subprocess import CalledProcessError
 import unittest.mock as mock
 from pathlib import Path
+from contextlib import ExitStack as does_not_raise
 
 import pytest
-from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus
+from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
 
 from charm import KubeOvnCharm
 
 ops.testing.SIMULATE_CAN_CONNECT = True
+DEFAULT_SERVICE_CIDR = "10.152.183.0/24"
 
 
 @pytest.fixture
@@ -210,6 +212,28 @@ def test_is_kubeconfig_available(harness, charm):
     assert charm.is_kubeconfig_available()
 
 
+def test_get_service_cidr(harness, charm):
+    harness.disable_hooks()
+    rel_id = harness.add_relation("kube-ovn", "kube-ovn")
+    harness.add_relation_unit(rel_id, "kube-ovn/0")
+    assert not charm.get_service_cidr()
+
+    harness.update_relation_data(
+        rel_id,
+        "kube-ovn/0",
+        {"service-cidr": DEFAULT_SERVICE_CIDR},
+    )
+    assert charm.get_service_cidr() == DEFAULT_SERVICE_CIDR
+
+    harness.add_relation_unit(rel_id, "kube-ovn/1")
+    harness.update_relation_data(
+        rel_id,
+        "kube-ovn/1",
+        {"service-cidr": "unspeakable-horror"},
+    )
+    assert charm.get_service_cidr() is None
+
+
 def test_load_manifest(charm):
     with pytest.raises(FileNotFoundError):
         charm.load_manifest("bogus.yaml")
@@ -316,7 +340,30 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
     harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
     configure_kube_ovn.return_value = kubconfig_ready
     charm.stored.kube_ovn_configured = kubconfig_ready
-    harness.update_relation_data(rel_id, "kubernetes-control-plane/0", {"key": "val"})
+    harness.update_relation_data(
+        rel_id,
+        "kubernetes-control-plane/0",
+        {"key": "val", "service-cidr": DEFAULT_SERVICE_CIDR},
+    )
+
+    configure_kube_ovn.assert_called_once_with()
+
+    if kubconfig_ready:
+        assert charm.unit.status == ActiveStatus()
+    else:
+        assert charm.unit.status == WaitingStatus(
+            "Waiting to retry configuring Kube-OVN"
+        )
+
+
+@pytest.mark.parametrize("kubconfig_ready", (True, False))
+@mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
+def test_change_kube_ovn_relation(configure_kube_ovn, kubconfig_ready, harness, charm):
+    rel_id = harness.add_relation("kube-ovn", "kube-ovn/1")
+    harness.add_relation_unit(rel_id, "kube-ovn/1")
+    configure_kube_ovn.return_value = kubconfig_ready
+    charm.stored.kube_ovn_configured = kubconfig_ready
+    harness.update_relation_data(rel_id, "kube-ovn/1", {"key": "val"})
 
     configure_kube_ovn.assert_called_once_with()
 
@@ -329,6 +376,7 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
 
 
 @mock.patch("charm.KubeOvnCharm.is_kubeconfig_available")
+@mock.patch("charm.KubeOvnCharm.get_service_cidr")
 @mock.patch("charm.KubeOvnCharm.check_if_pod_restart_will_be_needed")
 @mock.patch("charm.KubeOvnCharm.apply_crds")
 @mock.patch("charm.KubeOvnCharm.apply_ovn")
@@ -340,11 +388,13 @@ def test_configure_kube_ovn(
     apply_ovn,
     apply_crds,
     check_if_pod_restart_will_be_needed,
+    get_service_cidr,
     is_kubeconfig_available,
     charm,
 ):
     charm.stored.pod_restart_needed = True
     is_kubeconfig_available.return_value = True
+    get_service_cidr.return_value = DEFAULT_SERVICE_CIDR
     assert not charm.stored.kube_ovn_configured
 
     assert charm.configure_kube_ovn()
@@ -352,7 +402,7 @@ def test_configure_kube_ovn(
     check_if_pod_restart_will_be_needed.assert_called_once_with()
     apply_crds.assert_called_once_with()
     apply_ovn.assert_called_once_with()
-    apply_kube_ovn.assert_called_once_with()
+    apply_kube_ovn.assert_called_once_with(DEFAULT_SERVICE_CIDR)
     restart_pods.assert_called_once_with()
     assert charm.stored.kube_ovn_configured
 
@@ -406,7 +456,6 @@ def test_apply_kube_ovn(
     config_dict = {
         "default-cidr": "172.22.0.0/16",
         "default-gateway": "172.22.0.1",
-        "service-cidr": "10.152.183.0/24",
         "pinger-external-address": "10.152.183.1",
         "pinger-external-dns": "1.1.1.1",
         "node-switch-cidr": "100.64.0.0/16",
@@ -437,7 +486,9 @@ def test_apply_kube_ovn(
     ]
 
     # Test Method
-    charm.apply_kube_ovn()  # Heavy mocking here suggests perhaps a refactor.
+    charm.apply_kube_ovn(
+        DEFAULT_SERVICE_CIDR
+    )  # Heavy mocking here suggests perhaps a refactor.
 
     # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Kube-OVN resources")
@@ -472,13 +523,13 @@ def test_apply_kube_ovn(
                 args={
                     "--default-cidr": config_dict["default-cidr"],
                     "--default-gateway": config_dict["default-gateway"],
-                    "--service-cluster-ip-range": config_dict["service-cidr"],
+                    "--service-cluster-ip-range": DEFAULT_SERVICE_CIDR,
                     "--node-switch-cidr": config_dict["node-switch-cidr"],
                 },
             ),
             mock.call(
                 cni_server_container,
-                args={"--service-cluster-ip-range": config_dict["service-cidr"]},
+                args={"--service-cluster-ip-range": DEFAULT_SERVICE_CIDR},
             ),
             mock.call(
                 pinger_container,
@@ -554,3 +605,117 @@ def test_apply_ovn(
     )
     apply_manifest.assert_called_once_with(resources, "ovn.yaml")
     wait_for_ovn_central.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    "resource_name,content,expected_resource,exception",
+    [
+        pytest.param(
+            "kubectl-ko",
+            "Some content",
+            "kubectl-ko",
+            does_not_raise(),
+            id="Resource found",
+        ),
+        pytest.param(
+            "kubectl-ko",
+            "Some content",
+            "another-resource",
+            pytest.raises(NameError),
+            id="Resource not found",
+        ),
+    ],
+)
+def test_get_charm_resource_path(
+    charm,
+    harness,
+    resource_name,
+    expected_resource,
+    content,
+    exception,
+):
+    harness.add_resource(resource_name, content)
+    with exception:
+        charm.get_charm_resource_path(expected_resource)
+
+
+@mock.patch("charm.KubeOvnCharm.get_charm_resource_path")
+@mock.patch("charm.shutil.copy")
+@mock.patch("charm.os.chmod")
+def test_install_kubectl_plugin(mock_chmod, mock_copy, mock_get_resource, charm):
+    plugin_name = "test_plugin"
+    src_path = Path("/home/test") / plugin_name
+    dst_path = Path("/usr/local/bin") / plugin_name
+    mock_get_resource.return_value = src_path
+
+    charm.install_kubectl_plugin(plugin_name)
+
+    mock_copy.assert_called_once_with(src_path, dst_path)
+    mock_chmod.assert_called_once_with(dst_path, 0o755)
+
+
+@pytest.mark.parametrize(
+    "path,exception,log_message",
+    [
+        pytest.param(
+            None, ModelError, "Failed to install plugin", id="Resource not available"
+        ),
+        pytest.param(
+            None, NameError, "Failed to install plugin", id="Resource not found"
+        ),
+        pytest.param(
+            "/home/test/plugin",
+            OSError,
+            "Failed to copy plugin",
+            id="Failed to access location",
+        ),
+    ],
+)
+@mock.patch("charm.KubeOvnCharm.get_charm_resource_path")
+@mock.patch("charm.shutil.copy", mock.MagicMock())
+@mock.patch("charm.os.chmod", mock.MagicMock())
+def test_install_kubectl_plugin_raises(
+    mock_get_resource, path, exception, log_message, charm, caplog
+):
+    mock_get_resource.side_effect = exception
+    mock_get_resource.return_value = path
+
+    charm.install_kubectl_plugin("test_plugin")
+
+    assert log_message in caplog.text
+
+
+@mock.patch("charm.os.remove")
+def test_remove_kubectl_plugin(mock_remove, charm):
+    plugin_name = "test_plugin"
+    path = Path("/usr/local/bin") / plugin_name
+
+    charm.remove_kubectl_plugin(plugin_name)
+
+    mock_remove.assert_called_once_with(path)
+
+
+@mock.patch("charm.os.remove")
+def test_remove_kubectl_plugin_raises(mock_remove, charm, caplog):
+    mock_remove.side_effect = OSError
+    charm.remove_kubectl_plugin("test_plugin")
+
+    assert "Failed to remove plugin" in caplog.text
+
+
+@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
+def test_on_install(mock_install, charm, harness):
+    charm.on_install("mock_event")
+    mock_install.assert_called_once_with("kubectl-ko")
+
+
+@mock.patch("charm.KubeOvnCharm.remove_kubectl_plugin")
+def test_on_remove(mock_remove, charm, harness):
+    charm.on_remove("mock_event")
+    mock_remove.assert_called_once_with("kubectl-ko")
+
+
+@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
+def test_on_upgrade(mock_install, charm, harness):
+    charm.on_upgrade_charm("mock_event")
+    mock_install.assert_called_once_with("kubectl-ko")

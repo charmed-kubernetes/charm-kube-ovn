@@ -8,3 +8,12 @@ requires:
   cni:
     interface: kubernetes-cni
     scope: container
+peers:
+  kube-ovn:
+    interface: kube-ovn
+resources:
+  kubectl-ko:
+    type: file
+    filename: kubectl-ko
+    description: |
+      kubectl plugin to help better diagnose container network.

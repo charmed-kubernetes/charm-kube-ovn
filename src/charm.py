@@ -3,15 +3,25 @@
 import json
 import logging
 import os
+import shutil
 import traceback
 import yaml
+
+from pathlib import Path
 from subprocess import CalledProcessError, check_output
 from ops.charm import CharmBase
 from ops.framework import StoredState
 from ops.main import main
-from ops.model import ActiveStatus, WaitingStatus, MaintenanceStatus
+from ops.model import (
+    ActiveStatus,
+    WaitingStatus,
+    MaintenanceStatus,
+    ModelError,
+)
 
 log = logging.getLogger(__name__)
+
+PLUGINS_PATH = "/usr/local/bin"
 
 
 class KubeOvnCharm(CharmBase):
@@ -25,7 +35,13 @@ class KubeOvnCharm(CharmBase):
             self.on.cni_relation_changed, self.on_cni_relation_changed
         )
         self.framework.observe(self.on.cni_relation_joined, self.on_cni_relation_joined)
+        self.framework.observe(
+            self.on.kube_ovn_relation_changed, self.on_kube_ovn_relation_changed
+        )
         self.framework.observe(self.on.config_changed, self.on_config_changed)
+        self.framework.observe(self.on.install, self.on_install)
+        self.framework.observe(self.on.remove, self.on_remove)
+        self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
 
     def add_container_args(self, container, args, command=False):
         key = "command" if command else "args"
@@ -37,12 +53,11 @@ class KubeOvnCharm(CharmBase):
         self.unit.status = MaintenanceStatus("Applying CRDs")
         self.kubectl("apply", "-f", "templates/crd.yaml")
 
-    def apply_kube_ovn(self):
+    def apply_kube_ovn(self, service_cidr):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
         resources = self.load_manifest("kube-ovn.yaml")
         cidr = self.model.config["default-cidr"]
         gateway = self.model.config["default-gateway"]
-        service_cidr = self.model.config["service-cidr"]
         pinger_address = self.model.config["pinger-external-address"]
         pinger_dns = self.model.config["pinger-external-dns"]
         node_switch_cidr = self.model.config["node-switch-cidr"]
@@ -152,17 +167,18 @@ class KubeOvnCharm(CharmBase):
             relation.data[self.unit]["cidr"] = cidr
             relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.conflist"
 
-    def configure_kube_ovn(self):
-        if not self.is_kubeconfig_available():
-            self.unit.status = WaitingStatus("Waiting for Kubernetes API")
-            return
+    def configure_kube_ovn(self) -> bool:
+        service_cidr = self.get_service_cidr()
+        if not self.is_kubeconfig_available() or not service_cidr:
+            self.unit.status = WaitingStatus("Waiting for CNI relation")
+            return False
 
         try:
             self.check_if_pod_restart_will_be_needed()
 
             self.apply_crds()
             self.apply_ovn()
-            self.apply_kube_ovn()
+            self.apply_kube_ovn(service_cidr)
 
             if self.stored.pod_restart_needed:
                 self.restart_pods()
@@ -174,6 +190,18 @@ class KubeOvnCharm(CharmBase):
 
         self.stored.kube_ovn_configured = True
         return True
+
+    def get_charm_resource_path(self, resource_name):
+        try:
+            return self.model.resources.fetch(resource_name)
+        except ModelError as e:
+            log.error(
+                f"Something went wrong when claiming the {resource_name} resource."
+            )
+            raise e
+        except NameError as e:
+            log.error(f"Resource {resource_name} not found on the charm")
+            raise e
 
     def get_container_resource(self, resource, container_name):
         return next(
@@ -205,12 +233,50 @@ class KubeOvnCharm(CharmBase):
         ]
         return node_ips
 
+    def install_kubectl_plugin(self, plugin_name):
+        try:
+            resource_path = self.get_charm_resource_path(plugin_name)
+            plugin_path = Path(PLUGINS_PATH) / plugin_name
+            shutil.copy(resource_path, plugin_path)
+            os.chmod(plugin_path, 0o755)
+        except (ModelError, NameError) as e:
+            log.error(f"Failed to install plugin {plugin_name}")
+            log.error(e)
+        except OSError as e:
+            log.error(f"Failed to copy plugin {plugin_name}")
+            log.error(e)
+
     def is_kubeconfig_available(self):
         for relation in self.model.relations["cni"]:
             for unit in relation.units:
                 if relation.data[unit].get("kubeconfig-hash"):
                     return True
         return False
+
+    def set_service_cidr(self, event):
+        """Repeat received service-cidr from k8s-cp to each kube-ovn unit.
+
+        service-cidr is received over the cni relation only from
+        kubernetes-control-plane units.  the kube-ovn peer relation
+        shares the value around to each kube-ovn unit.
+        """
+        cni_service_cidr = event.relation.data[event.unit].get("service-cidr")
+        if cni_service_cidr:
+            for relation in self.model.relations["kube-ovn"]:
+                relation.data[self.unit]["service-cidr"] = cni_service_cidr
+
+    def get_service_cidr(self):
+        """Return the agreed service-cidr from each kube-ovn unit including self.
+
+        If there isn't unity in the relation, return None
+        """
+        joined_service_cidr = set()
+        for relation in self.model.relations["kube-ovn"]:
+            for unit in relation.units | {self.unit}:
+                service_cidr = relation.data[unit].get("service-cidr")
+                joined_service_cidr.add(service_cidr)
+        filtered = set(filter(bool, joined_service_cidr))
+        return filtered.pop() if len(filtered) == 1 else None
 
     def kubectl(self, *args):
         cmd = ["kubectl", "--kubeconfig", "/root/.kube/config"] + list(args)
@@ -225,6 +291,15 @@ class KubeOvnCharm(CharmBase):
         self.set_active_status()
 
     def on_cni_relation_changed(self, event):
+        self.set_service_cidr(event)
+
+        if not self.configure_kube_ovn():
+            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
+            return
+
+        self.set_active_status()
+
+    def on_kube_ovn_relation_changed(self, event):
         if not self.configure_kube_ovn():
             self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
             return
@@ -239,6 +314,23 @@ class KubeOvnCharm(CharmBase):
             return
 
         self.set_active_status()
+
+    def on_install(self, _):
+        self.install_kubectl_plugin("kubectl-ko")
+
+    def on_remove(self, _):
+        self.remove_kubectl_plugin("kubectl-ko")
+
+    def on_upgrade_charm(self, _):
+        self.install_kubectl_plugin("kubectl-ko")
+
+    def remove_kubectl_plugin(self, plugin_name):
+        try:
+            plugin_path = Path(PLUGINS_PATH) / plugin_name
+            os.remove(plugin_path)
+        except OSError as e:
+            log.error(f"Failed to remove plugin: {plugin_name}")
+            log.error(e)
 
     def render_manifest(self, manifest, name):
         os.makedirs("templates/rendered", exist_ok=True)
