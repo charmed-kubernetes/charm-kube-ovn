@@ -35,6 +35,9 @@ class KubeOvnCharm(CharmBase):
             self.on.cni_relation_changed, self.on_cni_relation_changed
         )
         self.framework.observe(self.on.cni_relation_joined, self.on_cni_relation_joined)
+        self.framework.observe(
+            self.on.kube_ovn_relation_changed, self.on_kube_ovn_relation_changed
+        )
         self.framework.observe(self.on.config_changed, self.on_config_changed)
         self.framework.observe(self.on.install, self.on_install)
         self.framework.observe(self.on.remove, self.on_remove)
@@ -44,12 +47,11 @@ class KubeOvnCharm(CharmBase):
         self.unit.status = MaintenanceStatus("Applying CRDs")
         self.kubectl("apply", "-f", "templates/crd.yaml")
 
-    def apply_kube_ovn(self):
+    def apply_kube_ovn(self, service_cidr):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
         resources = self.load_manifest("kube-ovn.yaml")
         cidr = self.model.config["default-cidr"]
         gateway = self.model.config["default-gateway"]
-        service_cidr = self.model.config["service-cidr"]
         pinger_address = self.model.config["pinger-external-address"]
         pinger_dns = self.model.config["pinger-external-dns"]
         node_ips = self.get_ovn_node_ips()
@@ -151,17 +153,18 @@ class KubeOvnCharm(CharmBase):
             relation.data[self.unit]["cidr"] = cidr
             relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.conflist"
 
-    def configure_kube_ovn(self):
-        if not self.is_kubeconfig_available():
-            self.unit.status = WaitingStatus("Waiting for Kubernetes API")
-            return
+    def configure_kube_ovn(self) -> bool:
+        service_cidr = self.get_service_cidr()
+        if not self.is_kubeconfig_available() or not service_cidr:
+            self.unit.status = WaitingStatus("Waiting for CNI relation")
+            return False
 
         try:
             self.check_if_pod_restart_will_be_needed()
 
             self.apply_crds()
             self.apply_ovn()
-            self.apply_kube_ovn()
+            self.apply_kube_ovn(service_cidr)
 
             if self.stored.pod_restart_needed:
                 self.restart_pods()
@@ -236,6 +239,31 @@ class KubeOvnCharm(CharmBase):
                     return True
         return False
 
+    def set_service_cidr(self, event):
+        """Repeat received service-cidr from k8s-cp to each kube-ovn unit.
+
+        service-cidr is received over the cni relation only from
+        kubernetes-control-plane units.  the kube-ovn peer relation
+        shares the value around to each kube-ovn unit.
+        """
+        cni_service_cidr = event.relation.data[event.unit].get("service-cidr")
+        if cni_service_cidr:
+            for relation in self.model.relations["kube-ovn"]:
+                relation.data[self.unit]["service-cidr"] = cni_service_cidr
+
+    def get_service_cidr(self):
+        """Return the agreed service-cidr from each kube-ovn unit including self.
+
+        If there isn't unity in the relation, return None
+        """
+        joined_service_cidr = set()
+        for relation in self.model.relations["kube-ovn"]:
+            for unit in relation.units | {self.unit}:
+                service_cidr = relation.data[unit].get("service-cidr")
+                joined_service_cidr.add(service_cidr)
+        filtered = set(filter(bool, joined_service_cidr))
+        return filtered.pop() if len(filtered) == 1 else None
+
     def kubectl(self, *args):
         cmd = ["kubectl", "--kubeconfig", "/root/.kube/config"] + list(args)
         return check_output(cmd)
@@ -249,6 +277,15 @@ class KubeOvnCharm(CharmBase):
         self.set_active_status()
 
     def on_cni_relation_changed(self, event):
+        self.set_service_cidr(event)
+
+        if not self.configure_kube_ovn():
+            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
+            return
+
+        self.set_active_status()
+
+    def on_kube_ovn_relation_changed(self, event):
         if not self.configure_kube_ovn():
             self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
             return

@@ -15,6 +15,7 @@ import ops.testing
 from charm import KubeOvnCharm
 
 ops.testing.SIMULATE_CAN_CONNECT = True
+DEFAULT_SERVICE_CIDR = "10.152.183.0/24"
 
 
 @pytest.fixture
@@ -211,6 +212,28 @@ def test_is_kubeconfig_available(harness, charm):
     assert charm.is_kubeconfig_available()
 
 
+def test_get_service_cidr(harness, charm):
+    harness.disable_hooks()
+    rel_id = harness.add_relation("kube-ovn", "kube-ovn")
+    harness.add_relation_unit(rel_id, "kube-ovn/0")
+    assert not charm.get_service_cidr()
+
+    harness.update_relation_data(
+        rel_id,
+        "kube-ovn/0",
+        {"service-cidr": DEFAULT_SERVICE_CIDR},
+    )
+    assert charm.get_service_cidr() == DEFAULT_SERVICE_CIDR
+
+    harness.add_relation_unit(rel_id, "kube-ovn/1")
+    harness.update_relation_data(
+        rel_id,
+        "kube-ovn/1",
+        {"service-cidr": "unspeakable-horror"},
+    )
+    assert charm.get_service_cidr() is None
+
+
 def test_load_manifest(charm):
     with pytest.raises(FileNotFoundError):
         charm.load_manifest("bogus.yaml")
@@ -317,7 +340,30 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
     harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
     configure_kube_ovn.return_value = kubconfig_ready
     charm.stored.kube_ovn_configured = kubconfig_ready
-    harness.update_relation_data(rel_id, "kubernetes-control-plane/0", {"key": "val"})
+    harness.update_relation_data(
+        rel_id,
+        "kubernetes-control-plane/0",
+        {"key": "val", "service-cidr": DEFAULT_SERVICE_CIDR},
+    )
+
+    configure_kube_ovn.assert_called_once_with()
+
+    if kubconfig_ready:
+        assert charm.unit.status == ActiveStatus()
+    else:
+        assert charm.unit.status == WaitingStatus(
+            "Waiting to retry configuring Kube-OVN"
+        )
+
+
+@pytest.mark.parametrize("kubconfig_ready", (True, False))
+@mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
+def test_change_kube_ovn_relation(configure_kube_ovn, kubconfig_ready, harness, charm):
+    rel_id = harness.add_relation("kube-ovn", "kube-ovn/1")
+    harness.add_relation_unit(rel_id, "kube-ovn/1")
+    configure_kube_ovn.return_value = kubconfig_ready
+    charm.stored.kube_ovn_configured = kubconfig_ready
+    harness.update_relation_data(rel_id, "kube-ovn/1", {"key": "val"})
 
     configure_kube_ovn.assert_called_once_with()
 
@@ -330,6 +376,7 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
 
 
 @mock.patch("charm.KubeOvnCharm.is_kubeconfig_available")
+@mock.patch("charm.KubeOvnCharm.get_service_cidr")
 @mock.patch("charm.KubeOvnCharm.check_if_pod_restart_will_be_needed")
 @mock.patch("charm.KubeOvnCharm.apply_crds")
 @mock.patch("charm.KubeOvnCharm.apply_ovn")
@@ -341,11 +388,13 @@ def test_configure_kube_ovn(
     apply_ovn,
     apply_crds,
     check_if_pod_restart_will_be_needed,
+    get_service_cidr,
     is_kubeconfig_available,
     charm,
 ):
     charm.stored.pod_restart_needed = True
     is_kubeconfig_available.return_value = True
+    get_service_cidr.return_value = DEFAULT_SERVICE_CIDR
     assert not charm.stored.kube_ovn_configured
 
     assert charm.configure_kube_ovn()
@@ -353,7 +402,7 @@ def test_configure_kube_ovn(
     check_if_pod_restart_will_be_needed.assert_called_once_with()
     apply_crds.assert_called_once_with()
     apply_ovn.assert_called_once_with()
-    apply_kube_ovn.assert_called_once_with()
+    apply_kube_ovn.assert_called_once_with(DEFAULT_SERVICE_CIDR)
     restart_pods.assert_called_once_with()
     assert charm.stored.kube_ovn_configured
 
@@ -390,7 +439,6 @@ def test_apply_kube_ovn(
     config_dict = {
         "default-cidr": "172.22.0.0/16",
         "default-gateway": "172.22.0.1",
-        "service-cidr": "10.152.183.0/24",
         "pinger-external-address": "10.152.183.1",
         "pinger-external-dns": "1.1.1.1",
     }
@@ -419,7 +467,9 @@ def test_apply_kube_ovn(
     ]
 
     # Test Method
-    charm.apply_kube_ovn()  # Heavy mocking here suggests perhaps a refactor.
+    charm.apply_kube_ovn(
+        DEFAULT_SERVICE_CIDR
+    )  # Heavy mocking here suggests perhaps a refactor.
 
     # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Kube-OVN resources")
@@ -454,12 +504,12 @@ def test_apply_kube_ovn(
                 args={
                     "--default-cidr": config_dict["default-cidr"],
                     "--default-gateway": config_dict["default-gateway"],
-                    "--service-cluster-ip-range": config_dict["service-cidr"],
+                    "--service-cluster-ip-range": DEFAULT_SERVICE_CIDR,
                 },
             ),
             mock.call(
                 cni_server_container,
-                args={"--service-cluster-ip-range": config_dict["service-cidr"]},
+                args={"--service-cluster-ip-range": DEFAULT_SERVICE_CIDR},
             ),
             mock.call(
                 pinger_container,
