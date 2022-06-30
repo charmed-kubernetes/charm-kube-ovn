@@ -145,6 +145,7 @@ def test_replace_images(harness, charm):
         == "rocks.canonical.com:443/cdk/cooler/image:latest"
     )
 
+
 def test_replace_container_env_vars(charm):
     container = dict(env=[dict(name="MY_ENV", value=2)])
     env_vars = dict(MY_ENV=0)
@@ -257,7 +258,7 @@ def test_get_registry(harness, charm):
 
     config_dict = {"image-registry": "some.registry.com:443/cdk"}
     harness.update_config(config_dict)
-    assert charm.get_registry() is "some.registry.com:443/cdk"
+    assert charm.get_registry() == "some.registry.com:443/cdk"
 
 
 def test_load_manifest(charm):
@@ -497,8 +498,7 @@ def test_apply_kube_ovn(
 
     # Test Method
     charm.apply_kube_ovn(
-        DEFAULT_SERVICE_CIDR,
-        DEFAULT_IMAGE_REGISTRY
+        DEFAULT_SERVICE_CIDR, DEFAULT_IMAGE_REGISTRY
     )  # Heavy mocking here suggests perhaps a refactor.
 
     # Assert Correct Behavior
@@ -582,7 +582,8 @@ def test_apply_ovn(
 ):
     node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
     ovn_central = get_resource.return_value = dict(spec=dict(replicas=None))
-    charm.apply_ovn(DEFAULT_IMAGE_REGISTRY)  # Heavy mocking here suggests perhaps a refactor.
+    # Heavy mocking here suggests perhaps a refactor.
+    charm.apply_ovn(DEFAULT_IMAGE_REGISTRY)
 
     assert charm.unit.status == MaintenanceStatus("Applying OVN resources")
     load_manifest.assert_called_once_with("ovn.yaml")

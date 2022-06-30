@@ -246,8 +246,9 @@ class KubeOvnCharm(CharmBase):
         return False
 
     def set_peer_data(self, event, cni_data_key, peer_relation_data_key=""):
-        """Repeat received CNI relation data to each kube-ovn unit. The keys for the CNI relation
-        data and peer relation data are assumed to be the same unless otherwise specified.
+        """Repeat received CNI relation data to each kube-ovn unit.
+        The keys for the CNI relation data and peer relation data
+        are assumed to be the same unless otherwise specified.
 
         CNI relation data is received over the cni relation only from
         kubernetes-control-plane units.  the kube-ovn peer relation
@@ -425,7 +426,8 @@ class KubeOvnCharm(CharmBase):
         )
 
     def get_peer_data_with_key(self, data_key):
-        """Return the agreed data associated with the key from each kube-ovn unit including self.
+        """Return the agreed data associated with the key
+        from each kube-ovn unit including self.
         If there isn't unity in the relation, return None
         """
         joined_data = set()
@@ -435,6 +437,7 @@ class KubeOvnCharm(CharmBase):
                 joined_data.add(data)
         filtered = set(filter(bool, joined_data))
         return filtered.pop() if len(filtered) == 1 else None
+
 
 if __name__ == "__main__":
     main(KubeOvnCharm)  # pragma: no cover
