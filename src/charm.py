@@ -41,6 +41,7 @@ class KubeOvnCharm(CharmBase):
         self.framework.observe(self.on.config_changed, self.on_config_changed)
         self.framework.observe(self.on.install, self.on_install)
         self.framework.observe(self.on.remove, self.on_remove)
+        self.framework.observe(self.on.update_status, self.on_update_status)
         self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
 
     def add_container_args(self, container, args, command=False):
@@ -115,8 +116,6 @@ class KubeOvnCharm(CharmBase):
         self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
-        self.wait_for_kube_ovn_controller()
-        self.wait_for_kube_ovn_cni()
 
     def apply_manifest(self, manifest, name):
         destination = self.render_manifest(manifest, name)
@@ -142,7 +141,6 @@ class KubeOvnCharm(CharmBase):
         )
 
         self.apply_manifest(resources, "ovn.yaml")
-        self.wait_for_ovn_central()
 
     def check_if_pod_restart_will_be_needed(self):
         output = self.kubectl(
@@ -166,12 +164,14 @@ class KubeOvnCharm(CharmBase):
             relation.data[self.unit]["cidr"] = cidr
             relation.data[self.unit]["cni-conf-file"] = "01-kube-ovn.conflist"
 
-    def configure_kube_ovn(self) -> bool:
+    def configure_kube_ovn(self):
+        self.stored.kube_ovn_configured = False
+
         service_cidr = self.kube_ovn_peer_data("service-cidr")
         registry = self.get_registry()
         if not self.is_kubeconfig_available() or not service_cidr or not registry:
             self.unit.status = WaitingStatus("Waiting for CNI relation")
-            return False
+            return
 
         try:
             self.check_if_pod_restart_will_be_needed()
@@ -181,15 +181,18 @@ class KubeOvnCharm(CharmBase):
             self.apply_kube_ovn(service_cidr, registry)
 
             if self.stored.pod_restart_needed:
+                self.wait_for_ovn_central()
+                self.wait_for_kube_ovn_controller()
+                self.wait_for_kube_ovn_cni()
                 self.restart_pods()
         except CalledProcessError:
             # Likely the Kubernetes API is unavailable. Log the exception in
             # case it it something else, and let the caller know we failed.
             log.error(traceback.format_exc())
-            return False
+            self.unit.status = WaitingStatus("Waiting to retry configuring Kube-OVN")
+            return
 
         self.stored.kube_ovn_configured = True
-        return True
 
     def get_registry(self):
         registry = self.model.config["image-registry"]
@@ -287,27 +290,17 @@ class KubeOvnCharm(CharmBase):
 
     def on_cni_relation_changed(self, event):
         self.cni_to_kube_ovn(event)
-
-        if not self.configure_kube_ovn():
-            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
-            return
+        self.configure_kube_ovn()
 
         self.set_active_status()
 
     def on_kube_ovn_relation_changed(self, event):
-        if not self.configure_kube_ovn():
-            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
-            return
-
+        self.configure_kube_ovn()
         self.set_active_status()
 
     def on_config_changed(self, event):
         self.configure_cni_relation()
-
-        if not self.configure_kube_ovn():
-            self.schedule_event_retry(event, "Waiting to retry configuring Kube-OVN")
-            return
-
+        self.configure_kube_ovn()
         self.set_active_status()
 
     def on_install(self, _):
@@ -315,6 +308,11 @@ class KubeOvnCharm(CharmBase):
 
     def on_remove(self, _):
         self.remove_kubectl_plugin("kubectl-ko")
+
+    def on_update_status(self, _):
+        if not self.stored.kube_ovn_configured:
+            self.configure_kube_ovn()
+        self.set_active_status()
 
     def on_upgrade_charm(self, _):
         self.install_kubectl_plugin("kubectl-ko")
@@ -405,10 +403,6 @@ class KubeOvnCharm(CharmBase):
                 self.kubectl("delete", "po", "-n", namespace, pod, "--ignore-not-found")
         self.stored.pod_restart_needed = False
 
-    def schedule_event_retry(self, event, message):
-        self.unit.status = WaitingStatus(message)
-        event.defer()
-
     def set_active_status(self):
         if self.stored.kube_ovn_configured:
             self.unit.status = ActiveStatus()
@@ -428,7 +422,7 @@ class KubeOvnCharm(CharmBase):
         self.unit.status = WaitingStatus("Waiting for ovn-central")
         self.wait_for_rollout("deployment/ovn-central")
 
-    def wait_for_rollout(self, name, namespace="kube-system", timeout=300):
+    def wait_for_rollout(self, name, namespace="kube-system", timeout=1):
         self.kubectl(
             "rollout", "status", "-n", namespace, name, "--timeout", str(timeout) + "s"
         )
