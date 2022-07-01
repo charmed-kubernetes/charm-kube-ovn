@@ -43,6 +43,12 @@ class KubeOvnCharm(CharmBase):
         self.framework.observe(self.on.remove, self.on_remove)
         self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
 
+    def add_container_args(self, container, args, command=False):
+        key = "command" if command else "args"
+        container_args = container.setdefault(key, [])
+        for k, v in args.items():
+            container_args.append(k + "=" + v)
+
     def apply_crds(self):
         self.unit.status = MaintenanceStatus("Applying CRDs")
         self.kubectl("apply", "-f", "templates/crd.yaml")
@@ -54,6 +60,8 @@ class KubeOvnCharm(CharmBase):
         gateway = self.model.config["default-gateway"]
         pinger_address = self.model.config["pinger-external-address"]
         pinger_dns = self.model.config["pinger-external-dns"]
+        node_switch_cidr = self.model.config["node-switch-cidr"]
+        node_switch_gateway = self.model.config["node-switch-gateway"]
         node_ips = self.get_ovn_node_ips()
 
         self.replace_images(resources)
@@ -70,7 +78,13 @@ class KubeOvnCharm(CharmBase):
                 "--default-cidr": cidr,
                 "--default-gateway": gateway,
                 "--service-cluster-ip-range": service_cidr,
+                "--node-switch-cidr": node_switch_cidr,
             },
+        )
+
+        self.add_container_args(
+            kube_ovn_controller_container,
+            args={"--node-switch-gateway": node_switch_gateway},
         )
 
         kube_ovn_cni = self.get_resource(
