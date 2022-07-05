@@ -5,7 +5,7 @@ jobs:
   integration-test:
     name: VSphere Integration Test
     runs-on: self-hosted
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Check out code
         uses: actions/checkout@v2
