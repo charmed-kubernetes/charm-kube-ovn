@@ -1,0 +1,45 @@
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: test-htb
+spec:
+  protocol: IPv4
+  default: false
+  namespaces:
+  - test-htb-ns
+  cidrBlock: 10.40.0.0/16
+  gateway: 10.40.0.1
+  excludeIps:
+  - 10.40.0.1
+  gatewayType: distributed
+  htbqos: htbqos-low
+  natOutgoing: true
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    ovn.kubernetes.io/cidr: 10.40.0.0/16
+    ovn.kubernetes.io/exclude_ips: 10.40.0.1
+    ovn.kubernetes.io/logical_switch: test-htb
+  name: test-htb-ns
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: prior
+  namespace: test-htb-ns
+  labels:
+    app: perf
+spec:
+  selector:
+    matchLabels:
+      app: perf
+  template:
+    metadata:
+      labels:
+        app: perf
+    spec:
+      containers:
+      - name: nginx
+        image: kubeovn/perf

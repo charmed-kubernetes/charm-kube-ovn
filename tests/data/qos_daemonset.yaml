@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ls1
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: perf
+  namespace: ls1
+  labels:
+    app: perf
+spec:
+  selector:
+    matchLabels:
+      app: perf
+  template:
+    metadata:
+      labels:
+        app: perf
+    spec:
+      containers:
+      - name: nginx
+        image: kubeovn/perf
