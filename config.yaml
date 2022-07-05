@@ -34,8 +34,8 @@ options:
     default: "google.com"
     description: |
       External DNS hostname used by kube-ovn-pinger for connectivity testing.
-  registry:
+  image-registry:
     type: string
-    default: "rocks.canonical.com"
+    default: ""
     description: |
       Image registry for the kube-ovn image.
