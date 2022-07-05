@@ -80,7 +80,11 @@ async def test_pod_network_limits(ops_test, kubeconfig, kubernetes):
     rate_values = (
         'ovn.kubernetes.io/ingress_rate="10" ovn.kubernetes.io/egress_rate="5"'
     )
-    cmd = f"kubectl annotate --overwrite pod {test_pod.metadata.name} -n {namespace} {rate_values}"
+    cmd = (
+        "kubectl annotate --overwrite "
+        f"pod {test_pod.metadata.name} "
+        f"-n {namespace} {rate_values}"
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
 
     assert rc == 0, f"Failed to annotate pod: {(stdout or stderr).strip()}"
@@ -123,22 +127,34 @@ async def test_linux_htb_performance(
     assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
 
     log.info("Annotate client pods with QoS priority values...")
-    cmd = f"kubectl annotate --overwrite pod {pod_prior.metadata.name} -n {namespace} ovn.kubernetes.io/priority={NEW_PRIORITY_HTB}"
+    cmd = (
+        f"kubectl annotate --overwrite "
+        f"pod {pod_prior.metadata.name} "
+        f"-n {namespace} ovn.kubernetes.io/priority={NEW_PRIORITY_HTB}"
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
 
     assert rc == 0, f"Failed to annotate pod: {(stdout or stderr).strip()}"
 
-    cmd = f"kubectl annotate --overwrite pod {pod_non_prior.metadata.name} -n {namespace} ovn.kubernetes.io/priority={LOW_PRIORITY_HTB}"
+    cmd = (
+        "kubectl annotate --overwrite "
+        f"pod {pod_non_prior.metadata.name}"
+        f"-n {namespace} ovn.kubernetes.io/priority={LOW_PRIORITY_HTB}"
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
 
     assert rc == 0, f"Failed to annotate pod: {(stdout or stderr).strip()}"
 
     cmd = []
     cmd.append(
-        f'kubectl exec {pod_prior.metadata.name} -n {namespace} -- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
+        f"kubectl exec {pod_prior.metadata.name} "
+        f"-n {namespace} "
+        f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
     )
     cmd.append(
-        f'kubectl exec {pod_non_prior.metadata.name} -n {namespace} -- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
+        f"kubectl exec {pod_non_prior.metadata.name} "
+        f"-n {namespace} "
+        f'-- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
     )
 
     processes = []
@@ -182,7 +198,11 @@ async def test_linux_htb_qos(ops_test, kubeconfig, kubernetes):
     await check_pod_htb_qos(ops_test, nodes, "prior", LOW_PRIORITY_HTB)
 
     log.info("Annotate pods with new priority value...")
-    cmd = f"kubectl annotate --overwrite pod -n test-htb-ns -l app=perf ovn.kubernetes.io/priority={NEW_PRIORITY_HTB}"
+    cmd = (
+        f"kubectl annotate --overwrite pod "
+        "-n test-htb-ns -l app=perf "
+        f"ovn.kubernetes.io/priority={NEW_PRIORITY_HTB}"
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
 
     log.info("Check pods change QoS value...")
@@ -236,7 +256,11 @@ async def run_bandwidth_test(ops_test, server, client, namespace):
 
     assert rc == 0, f"Failed to setup iperf3 server: {(stderr or stdout).strip()}"
 
-    cmd = f'kubectl exec {client.metadata.name} -n {namespace} -- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
+    cmd = (
+        f"kubectl exec {client.metadata.name} "
+        f"-n {namespace} "
+        f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
