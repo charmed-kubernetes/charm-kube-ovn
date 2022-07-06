@@ -3,7 +3,6 @@ from lightkube import Client
 from lightkube.resources.core_v1 import Pod
 from pytest_operator.plugin import OpsTest
 
-import json
 import shlex
 import os
 import pytest
@@ -71,7 +70,7 @@ async def test_pod_network_limits(ops_test, kubeconfig, kubernetes):
     assert rc == 0, f"Failed to deploy resources: {(stderr or stdout).strip()}"
 
     # Sleep to wait for resources to become available
-    time.sleep(10)
+    time.sleep(60)
 
     server, test_pod, _ = list(kubernetes.list(Pod, namespace="ls1"))
     namespace = server.metadata.namespace
@@ -90,11 +89,15 @@ async def test_pod_network_limits(ops_test, kubeconfig, kubernetes):
     assert rc == 0, f"Failed to annotate pod: {(stdout or stderr).strip()}"
 
     log.info("Test ingress bandwidth...")
-    ingress_bw = await run_bandwidth_test(ops_test, server, test_pod, namespace)
+    ingress_bw = await run_bandwidth_test(
+        ops_test, server, test_pod, namespace, kubeconfig
+    )
     assert 5.0 <= ingress_bw <= 5.50
 
     log.info("Test egress bandwidth...")
-    egress_bw = await run_bandwidth_test(ops_test, test_pod, server, namespace)
+    egress_bw = await run_bandwidth_test(
+        ops_test, test_pod, server, namespace, kubeconfig
+    )
     assert 10.0 <= egress_bw <= 10.50
 
     log.info("Clean up resources...")
@@ -113,7 +116,7 @@ async def test_linux_htb_performance(
     assert rc == 0, f"Failed to deploy resources: {(stderr or stdout).strip()}"
 
     # Sleep to wait for resources to become available
-    time.sleep(10)
+    time.sleep(60)
 
     server, pod_prior, pod_non_prior = list(kubernetes.list(Pod, namespace="ls1"))
     namespace = server.metadata.namespace
@@ -178,52 +181,6 @@ async def test_linux_htb_performance(
     assert prior_bw > non_prior_bw
 
 
-async def test_linux_htb_qos(ops_test, kubeconfig, kubernetes):
-    os.environ["KUBECONFIG"] = str(kubeconfig)
-
-    log.info("Deploy linux-htb test resources...")
-    resources = Path.cwd() / "tests/data/htb_subnet.yaml"
-
-    cmd = f"kubectl apply -f {resources}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-
-    assert (
-        rc == 0
-    ), f"Failed to deploy linux-htb test resources {(stderr or stdout).strip()}"
-
-    pods = kubernetes.list(Pod, namespace="test-htb-ns", labels={"app": "perf"})
-    nodes = {p.spec.nodeName for p in pods}
-
-    log.info("Check pods inherit the QoS value of the subnet...")
-    await check_pod_htb_qos(ops_test, nodes, "prior", LOW_PRIORITY_HTB)
-
-    log.info("Annotate pods with new priority value...")
-    cmd = (
-        f"kubectl annotate --overwrite pod "
-        "-n test-htb-ns -l app=perf "
-        f"ovn.kubernetes.io/priority={NEW_PRIORITY_HTB}"
-    )
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-
-    log.info("Check pods change QoS value...")
-    await check_pod_htb_qos(ops_test, nodes, "prior", NEW_PRIORITY_HTB)
-
-    log.info("Clean up linux-htb resources...")
-    cmd = f"kubectl delete -f {resources}"
-    await ops_test.run(*shlex.split(cmd))
-
-
-async def check_pod_htb_qos(ops_test, nodes, pod_name, priority):
-    for node in nodes:
-        cmd = f"kubectl ko vsctl {node} -f json list queue"
-        rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-        assert rc == 0
-        pods = parse_vsctl_json(stdout)
-        for pod, pod_priority in pods.items():
-            if pod_name in pod:
-                assert pod_priority == priority
-
-
 def parse_iperf_result(output):
     # First line contains test result
     line = output.split("\n")[0]
@@ -231,33 +188,23 @@ def parse_iperf_result(output):
     return float(re.sub(" +", " ", line).split(" ")[6])
 
 
-def parse_vsctl_json(raw_json):
-    # vsctl returns a JSON with two fields (data and headings)
-    # "data" holds the queue information.
-    parsed = json.loads(raw_json)["data"]
-    pods = {}
-
-    for queue in parsed:
-        # This index contains the name
-        pod = queue[2][1][1][1]
-        # This index contains the linux-htb QoS value
-        qos_value = queue[3][1][0][1]
-        pods[pod] = qos_value
-    return pods
-
-
-async def run_bandwidth_test(ops_test, server, client, namespace):
+async def run_bandwidth_test(ops_test, server, client, namespace, kubeconfig):
     server_ip = server.status.podIP
 
     log.info("Setup iperf3 server...")
     iperf3_cmd = "iperf3 -s -p 5101 --daemon"
-    cmd = f"kubectl exec {server.metadata.name} -n {namespace} -- {iperf3_cmd}"
+    cmd = (
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {server.metadata.name} "
+        f"-n {namespace} -- {iperf3_cmd}"
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
 
     assert rc == 0, f"Failed to setup iperf3 server: {(stderr or stdout).strip()}"
 
     cmd = (
-        f"kubectl exec {client.metadata.name} "
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {client.metadata.name} "
         f"-n {namespace} "
         f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
     )
