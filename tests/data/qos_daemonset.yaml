@@ -21,4 +21,4 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: kubeovn/perf
+        image: rocks.canonical.com/cdk/kubeovn/perf:latest
