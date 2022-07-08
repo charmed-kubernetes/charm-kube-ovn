@@ -1,6 +1,5 @@
 from math import isclose
 from pathlib import Path
-from lightkube.resources.core_v1 import Pod
 from pytest_operator.plugin import OpsTest
 
 import shlex
@@ -62,15 +61,6 @@ async def test_kubectl_ko_plugin(ops_test: OpsTest):
 
 
 async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
-
-    for pod in iperf3_pods:
-        client.wait(
-            Pod,
-            pod.metadata.name,
-            for_conditions=["Ready"],
-            namespace=pod.metadata.namespace,
-        )
-
     server, test_pod, _ = iperf3_pods
     namespace = server.metadata.namespace
 
@@ -98,14 +88,6 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     TODO: This test is not working as intended
     and must be fixed.
     """
-
-    for pod in iperf3_pods:
-        client.wait(
-            Pod,
-            pod.metadata.name,
-            for_conditions=["Ready"],
-            namespace=pod.metadata.namespace,
-        )
 
     server, pod_prior, pod_non_prior = iperf3_pods
     namespace = server.metadata.namespace
@@ -164,14 +146,6 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
 
 
 async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
-    for pod in iperf3_pods:
-        client.wait(
-            Pod,
-            pod.metadata.name,
-            for_conditions=["Ready"],
-            namespace=pod.metadata.namespace,
-        )
-
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -192,14 +166,6 @@ async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
 
 
 async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
-    for pod in iperf3_pods:
-        client.wait(
-            Pod,
-            pod.metadata.name,
-            for_conditions=["Ready"],
-            namespace=pod.metadata.namespace,
-        )
-
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -223,13 +189,6 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
 async def test_pod_netem_limit(ops_test, kubeconfig, client, iperf3_pods):
     expected_limit = 100
     for pod in iperf3_pods:
-        client.wait(
-            Pod,
-            pod.metadata.name,
-            for_conditions=["Ready"],
-            namespace=pod.metadata.namespace,
-        )
-
         # Annotate all the pods so we dont have to worry about
         # which worker node we pick to check the qdisk
         limit_annotation = f'ovn.kubernetes.io/limit="{expected_limit}"'
