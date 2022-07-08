@@ -2,7 +2,7 @@ import logging
 from pathlib import Path
 
 import pytest
-from lightkube import Client, KubeConfig
+from lightkube import Client, codecs, KubeConfig
 
 log = logging.getLogger(__name__)
 
@@ -26,10 +26,21 @@ async def kubeconfig(ops_test):
 
 
 @pytest.fixture()
-async def kubernetes(kubeconfig):
+async def client(kubeconfig):
     config = KubeConfig.from_file(kubeconfig)
     client = Client(
         config=config.get(context_name="juju-context"),
         trust_env=False,
     )
     yield client
+
+
+@pytest.fixture()
+def iperf3_yaml_path(client):
+    path = Path.cwd() / "tests/data/iperf3_daemonset.yaml"
+    yield path
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(
+                type(obj), obj.metadata.name, namespace=obj.metadata.namespace
+            )

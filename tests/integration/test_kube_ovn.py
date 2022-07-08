@@ -1,15 +1,15 @@
+from math import isclose
 from pathlib import Path
-from lightkube import Client
+from lightkube import Client, codecs
 from lightkube.resources.core_v1 import Pod
+from lightkube.resources.apps_v1 import DaemonSet
 from pytest_operator.plugin import OpsTest
 
 import shlex
-import os
 import pytest
 import logging
 import re
 import subprocess
-import time
 
 log = logging.getLogger(__name__)
 
@@ -62,17 +62,24 @@ async def test_kubectl_ko_plugin(ops_test: OpsTest):
         ), f"Failed to execute kubectl-ko on machine:{m} {(stderr or stdout).strip()}"
 
 
-async def test_pod_network_limits(ops_test, kubeconfig, kubernetes):
-    os.environ["KUBECONFIG"] = str(kubeconfig)
-    resources = Path.cwd() / "tests/data/qos_daemonset.yaml"
-    cmd = f"kubectl apply -f {resources}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to deploy resources: {(stderr or stdout).strip()}"
+async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_yaml_path):
+    with open(iperf3_yaml_path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj)
 
-    # Sleep to wait for resources to become available
-    time.sleep(60)
+    wait_daemonset(client, "ls1", "perf", 3)
 
-    server, test_pod, _ = list(kubernetes.list(Pod, namespace="ls1"))
+    pods = list(client.list(Pod, namespace="ls1"))
+
+    for pod in pods:
+        client.wait(
+            Pod,
+            pod.metadata.name,
+            for_conditions=["Ready"],
+            namespace=pod.metadata.namespace,
+        )
+
+    server, test_pod, _ = pods
     namespace = server.metadata.namespace
 
     log.info("Annotate test pod with rate limit values...")
@@ -80,7 +87,8 @@ async def test_pod_network_limits(ops_test, kubeconfig, kubernetes):
         'ovn.kubernetes.io/ingress_rate="10" ovn.kubernetes.io/egress_rate="5"'
     )
     cmd = (
-        "kubectl annotate --overwrite "
+        f"kubectl --kubeconfig {kubeconfig} "
+        "annotate --overwrite "
         f"pod {test_pod.metadata.name} "
         f"-n {namespace} {rate_values}"
     )
@@ -92,47 +100,55 @@ async def test_pod_network_limits(ops_test, kubeconfig, kubernetes):
     ingress_bw = await run_bandwidth_test(
         ops_test, server, test_pod, namespace, kubeconfig
     )
-    assert 5.0 <= ingress_bw <= 5.50
+    assert isclose(ingress_bw, 5.0, abs_tol=0.5)
 
     log.info("Test egress bandwidth...")
     egress_bw = await run_bandwidth_test(
         ops_test, test_pod, server, namespace, kubeconfig
     )
-    assert 10.0 <= egress_bw <= 10.50
-
-    log.info("Clean up resources...")
-    cmd = f"kubectl delete -f {resources}"
-    await ops_test.run(*shlex.split(cmd))
+    assert isclose(egress_bw, 10.0, abs_tol=0.5)
 
 
 @pytest.mark.skip
-async def test_linux_htb_performance(
-    ops_test: OpsTest, kubeconfig: Path, kubernetes: Client
-):
-    os.environ["KUBECONFIG"] = str(kubeconfig)
-    resources = Path.cwd() / "tests/data/qos_daemonset.yaml"
-    cmd = f"kubectl apply -f {resources}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to deploy resources: {(stderr or stdout).strip()}"
+async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_yaml_path):
+    """
+    TODO: This test is not working as intended
+    and must be fixed.
+    """
+    with open(iperf3_yaml_path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj)
 
-    # Sleep to wait for resources to become available
-    time.sleep(60)
+    wait_daemonset(client, "ls1", "perf", 3)
+    pods = list(client.list(Pod, namespace="ls1"))
 
-    server, pod_prior, pod_non_prior = list(kubernetes.list(Pod, namespace="ls1"))
+    for pod in pods:
+        client.wait(
+            Pod,
+            pod.metadata.name,
+            for_conditions=["Ready"],
+            namespace=pod.metadata.namespace,
+        )
+
+    server, pod_prior, pod_non_prior = pods
     namespace = server.metadata.namespace
     server_ip = server.status.podIP
 
     log.info("Setup iperf3 servers...")
     iperf3_cmd = 'sh -c "iperf3 -s -p 5101 --daemon && iperf3 -s -p 5102 --daemon"'
-    cmd = f"kubectl exec {server.metadata.name} -n {namespace} -- {iperf3_cmd}"
+    cmd = (
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {server.metadata.name} -n {namespace} "
+        f"-- {iperf3_cmd}"
+    )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
 
     assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
 
     log.info("Annotate client pods with QoS priority values...")
     cmd = (
-        f"kubectl annotate --overwrite "
-        f"pod {pod_prior.metadata.name} "
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"annotate --overwrite pod {pod_prior.metadata.name} "
         f"-n {namespace} ovn.kubernetes.io/priority={NEW_PRIORITY_HTB}"
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
@@ -140,8 +156,8 @@ async def test_linux_htb_performance(
     assert rc == 0, f"Failed to annotate pod: {(stdout or stderr).strip()}"
 
     cmd = (
-        "kubectl annotate --overwrite "
-        f"pod {pod_non_prior.metadata.name}"
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"annotate --overwrite pod {pod_non_prior.metadata.name}"
         f"-n {namespace} ovn.kubernetes.io/priority={LOW_PRIORITY_HTB}"
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
@@ -150,12 +166,14 @@ async def test_linux_htb_performance(
 
     cmd = []
     cmd.append(
-        f"kubectl exec {pod_prior.metadata.name} "
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {pod_prior.metadata.name} "
         f"-n {namespace} "
         f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
     )
     cmd.append(
-        f"kubectl exec {pod_non_prior.metadata.name} "
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {pod_non_prior.metadata.name} "
         f"-n {namespace} "
         f'-- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
     )
@@ -173,10 +191,6 @@ async def test_linux_htb_performance(
 
     prior_bw = parse_iperf_result(results[0])
     non_prior_bw = parse_iperf_result(results[1])
-
-    log.info("Clean up resources...")
-    cmd = f"kubectl delete -f {resources}"
-    await ops_test.run(*shlex.split(cmd))
 
     assert prior_bw > non_prior_bw
 
@@ -212,3 +226,14 @@ async def run_bandwidth_test(ops_test, server, client, namespace, kubeconfig):
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
     return parse_iperf_result(stdout)
+
+
+def wait_daemonset(client: Client, namespace, name, pods_ready):
+    for _, obj in client.watch(
+        DaemonSet, namespace=namespace, fields={"metadata.name": name}
+    ):
+        if obj.status is None:
+            continue
+        status = obj.status.to_dict()
+        if status["numberReady"] == pods_ready:
+            return
