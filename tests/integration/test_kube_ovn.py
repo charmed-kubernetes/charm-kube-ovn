@@ -1,8 +1,6 @@
 from math import isclose
 from pathlib import Path
-from lightkube import Client, codecs
 from lightkube.resources.core_v1 import Pod
-from lightkube.resources.apps_v1 import DaemonSet
 from pytest_operator.plugin import OpsTest
 
 import shlex
@@ -62,16 +60,9 @@ async def test_kubectl_ko_plugin(ops_test: OpsTest):
         ), f"Failed to execute kubectl-ko on machine:{m} {(stderr or stdout).strip()}"
 
 
-async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_yaml_path):
-    with open(iperf3_yaml_path) as f:
-        for obj in codecs.load_all_yaml(f):
-            client.create(obj)
+async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
 
-    wait_daemonset(client, "ls1", "perf", 3)
-
-    pods = list(client.list(Pod, namespace="ls1"))
-
-    for pod in pods:
+    for pod in iperf3_pods:
         client.wait(
             Pod,
             pod.metadata.name,
@@ -79,7 +70,7 @@ async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_yaml_path
             namespace=pod.metadata.namespace,
         )
 
-    server, test_pod, _ = pods
+    server, test_pod, _ = iperf3_pods
     namespace = server.metadata.namespace
 
     log.info("Annotate test pod with rate limit values...")
@@ -110,19 +101,13 @@ async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_yaml_path
 
 
 @pytest.mark.skip
-async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_yaml_path):
+async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     """
     TODO: This test is not working as intended
     and must be fixed.
     """
-    with open(iperf3_yaml_path) as f:
-        for obj in codecs.load_all_yaml(f):
-            client.create(obj)
 
-    wait_daemonset(client, "ls1", "perf", 3)
-    pods = list(client.list(Pod, namespace="ls1"))
-
-    for pod in pods:
+    for pod in iperf3_pods:
         client.wait(
             Pod,
             pod.metadata.name,
@@ -130,7 +115,7 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_yaml_p
             namespace=pod.metadata.namespace,
         )
 
-    server, pod_prior, pod_non_prior = pods
+    server, pod_prior, pod_non_prior = iperf3_pods
     namespace = server.metadata.namespace
     server_ip = server.status.podIP
 
@@ -226,14 +211,3 @@ async def run_bandwidth_test(ops_test, server, client, namespace, kubeconfig):
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
     return parse_iperf_result(stdout)
-
-
-def wait_daemonset(client: Client, namespace, name, pods_ready):
-    for _, obj in client.watch(
-        DaemonSet, namespace=namespace, fields={"metadata.name": name}
-    ):
-        if obj.status is None:
-            continue
-        status = obj.status.to_dict()
-        if status["numberReady"] == pods_ready:
-            return
