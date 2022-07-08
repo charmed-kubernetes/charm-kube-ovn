@@ -124,8 +124,10 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     new_priority_annotation = f'ovn.kubernetes.io/priority="{NEW_PRIORITY_HTB}"'
     annotate_pod(ops_test, kubeconfig, pod_prior, namespace, new_priority_annotation)
 
-    low_priority_annotation =  f'ovn.kubernetes.io/priority="{LOW_PRIORITY_HTB}"'
-    annotate_pod(ops_test, kubeconfig, pod_non_prior, namespace, low_priority_annotation)
+    low_priority_annotation = f'ovn.kubernetes.io/priority="{LOW_PRIORITY_HTB}"'
+    annotate_pod(
+        ops_test, kubeconfig, pod_non_prior, namespace, low_priority_annotation
+    )
 
     cmd = []
     cmd.append(
@@ -176,9 +178,7 @@ async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
     annotate_pod(ops_test, kubeconfig, pinger, namespace, latency_annotation)
 
     log.info("Testing ping latency ...")
-    stdout = await ping(
-        ops_test, pinger, pingee, namespace, kubeconfig
-    )
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
     average_latency = parse_ping_delay(stdout)
     assert isclose(average_latency, latency, rel_tol=0.05)
 
@@ -197,9 +197,7 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
 
     # Test loss before applying the annotation
     log.info("Testing ping loss ...")
-    stdout = await ping(
-        ops_test, pinger, pingee, namespace, kubeconfig
-    )
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
     actual_loss = parse_ping_loss(stdout)
     assert actual_loss == 0
 
@@ -209,9 +207,7 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
     annotate_pod(ops_test, kubeconfig, pinger, namespace, loss_annotation)
 
     log.info("Testing ping loss ...")
-    stdout = await ping(
-        ops_test, pinger, pingee, namespace, kubeconfig
-    )
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
     actual_loss = parse_ping_loss(stdout)
     assert actual_loss == expected_loss
 
