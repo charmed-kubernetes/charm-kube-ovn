@@ -16,6 +16,7 @@ NEW_PRIORITY_HTB = "50"
 
 
 @pytest.mark.abort_on_fail
+@pytest.mark.skip_if_deployed
 async def test_build_and_deploy(ops_test: OpsTest):
     log.info("Build charm...")
     charm = await ops_test.build_charm(".")
@@ -76,7 +77,7 @@ async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
     rate_values = (
         'ovn.kubernetes.io/ingress_rate="10" ovn.kubernetes.io/egress_rate="5"'
     )
-    annotate_pod(ops_test, kubeconfig, test_pod, namespace, rate_values)
+    await annotate_pod(ops_test, kubeconfig, test_pod, namespace, rate_values)
 
     log.info("Test ingress bandwidth...")
     ingress_bw = await run_bandwidth_test(
@@ -122,10 +123,10 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
 
     new_priority_annotation = f'ovn.kubernetes.io/priority="{NEW_PRIORITY_HTB}"'
-    annotate_pod(ops_test, kubeconfig, pod_prior, namespace, new_priority_annotation)
+    await annotate_pod(ops_test, kubeconfig, pod_prior, namespace, new_priority_annotation)
 
     low_priority_annotation = f'ovn.kubernetes.io/priority="{LOW_PRIORITY_HTB}"'
-    annotate_pod(
+    await annotate_pod(
         ops_test, kubeconfig, pod_non_prior, namespace, low_priority_annotation
     )
 
@@ -175,7 +176,7 @@ async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
     # latency is in ms
     latency = 1000
     latency_annotation = f'ovn.kubernetes.io/latency="{latency}"'
-    annotate_pod(ops_test, kubeconfig, pinger, namespace, latency_annotation)
+    await annotate_pod(ops_test, kubeconfig, pinger, namespace, latency_annotation)
 
     log.info("Testing ping latency ...")
     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
@@ -204,7 +205,7 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
     # Annotate and test again
     expected_loss = 100
     loss_annotation = f'ovn.kubernetes.io/loss="{expected_loss}"'
-    annotate_pod(ops_test, kubeconfig, pinger, namespace, loss_annotation)
+    await annotate_pod(ops_test, kubeconfig, pinger, namespace, loss_annotation)
 
     log.info("Testing ping loss ...")
     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
@@ -255,7 +256,7 @@ async def ping(ops_test, pinger, pingee, namespace, kubeconfig):
         f'-- sh -c "ping {pingee_ip} -w 5"'
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
+    assert rc == 0, f"Failed to run ping: {(stdout or stderr).strip()}"
 
     return stdout
 
