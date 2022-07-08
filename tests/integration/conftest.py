@@ -1,3 +1,5 @@
+import time
+
 import pytest
 import logging
 
@@ -5,6 +7,7 @@ from pathlib import Path
 from lightkube import Client, codecs, KubeConfig
 from lightkube.resources.apps_v1 import DaemonSet
 from lightkube.resources.core_v1 import Pod
+from lightkube.resources.core_v1 import Namespace
 
 
 log = logging.getLogger(__name__)
@@ -40,21 +43,40 @@ async def client(kubeconfig):
 
 @pytest.fixture()
 def iperf3_pods(client):
+    log.info("Creating iperf3 resources ...")
     path = Path.cwd() / "tests/data/iperf3_daemonset.yaml"
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
+            if obj.kind == "Namespace":
+                namespace = obj.metadata.name
+            if obj.kind == "DaemonSet":
+                ds = obj.metadata.name
             client.create(obj)
 
-    wait_daemonset(client, "ls1", "perf", 3)
-    pods = list(client.list(Pod, namespace="ls1"))
+    wait_daemonset(client, namespace, ds, 3)
+    pods = list(client.list(Pod, namespace=namespace))
 
     yield pods
 
+    log.info("Deleting iperf3 resources ...")
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
             client.delete(
                 type(obj), obj.metadata.name, namespace=obj.metadata.namespace
             )
+
+    # wait for pods to be deleted
+    remaining_pods = list(client.list(Pod, namespace=namespace))
+    while len(remaining_pods) != 0:
+        log.info("iperf3 pods still in existence, waiting ...")
+        remaining_pods = list(client.list(Pod, namespace=namespace))
+        time.sleep(5)
+
+    while namespace in list(client.list(Namespace)):
+        log.info("iperf3 namespace still in existence, waiting ...")
+        time.sleep(5)
+
+    log.info("iperf3 cleanup finished")
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
