@@ -79,7 +79,6 @@ def iperf3_pods(client):
     log.info("iperf3 cleanup finished")
 
 
-
 def wait_daemonset(client: Client, namespace, name, pods_ready):
     for _, obj in client.watch(
         DaemonSet, namespace=namespace, fields={"metadata.name": name}
