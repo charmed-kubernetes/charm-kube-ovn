@@ -4,6 +4,8 @@ applications:
   kubernetes-control-plane:
     options:
       allow-privileged: "true"
+  kubernetes-worker:
+    num_units: 3
   kube-ovn:
     charm: {{charm}}
     resources:
