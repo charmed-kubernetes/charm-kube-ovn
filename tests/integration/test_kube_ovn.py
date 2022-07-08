@@ -173,6 +173,11 @@ async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
+    # ping once before the test, as the first ping delay takes a bit, but subsequent pings
+    # work as expected
+    # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
+
     # latency is in ms
     latency = 1000
     latency_annotation = f'ovn.kubernetes.io/latency="{latency}"'
@@ -211,6 +216,34 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
     actual_loss = parse_ping_loss(stdout)
     assert actual_loss == expected_loss
+
+async def test_pod_netem_limit(ops_test, kubeconfig, client, iperf3_pods):
+    expected_limit = 100
+    for pod in iperf3_pods:
+        client.wait(
+            Pod,
+            pod.metadata.name,
+            for_conditions=["Ready"],
+            namespace=pod.metadata.namespace,
+        )
+
+        # Annotate all the pods so we dont have to worry about
+        # which worker node we pick to check the qdisk
+        limit_annotation = f'ovn.kubernetes.io/limit="{expected_limit}"'
+        await annotate_pod(ops_test, kubeconfig, pod, pod.metadata.namespace, limit_annotation)
+
+    log.info("Looking for kubernetes-worker/0 netem interface ...")
+    cmd = "juju run --unit kubernetes-worker/0 -- ip link"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to run ip link: {(stdout or stderr).strip()}"
+
+    interface = parse_ip_link(stdout)
+    log.info(f"Checking qdisk on interface {interface} for correct limit ...")
+    cmd = f"juju run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to run tc qdisc show: {(stdout or stderr).strip()}"
+    actual_limit = parse_tc_show(stdout)
+    assert actual_limit == expected_limit
 
 
 def parse_iperf_result(output):
@@ -256,25 +289,63 @@ async def ping(ops_test, pinger, pingee, namespace, kubeconfig):
         f'-- sh -c "ping {pingee_ip} -w 5"'
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run ping: {(stdout or stderr).strip()}"
 
     return stdout
 
 
 def parse_ping_delay(stdout):
+    # ping output looks like this:
+    # PING google.com(dfw28s31-in-x0e.1e100.net (2607:f8b0:4000:818::200e)) 56 data bytes
+    # 64 bytes from dfw28s31-in-x0e.1e100.net (2607:f8b0:4000:818::200e): icmp_seq=1 ttl=115 time=518 ms
+    # 64 bytes from dfw28s31-in-x0e.1e100.net (2607:f8b0:4000:818::200e): icmp_seq=2 ttl=115 time=50.9 ms
+    #
+    # --- google.com ping statistics ---
+    # 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
+    # rtt min/avg/max/mdev = 50.860/284.419/517.978/233.559 ms
+
     lines = stdout.splitlines()
     delay_line = lines[-1]
     delay_stats = delay_line.split("=")[-1]
     average_delay = delay_stats.split("/")[1]
-    return average_delay
+    return float(average_delay)
 
 
 def parse_ping_loss(stdout):
     lines = stdout.splitlines()
-    loss_line = lines[-2]
+    loss_line = [line for line in lines if "loss" in line][0]
     loss_stats = loss_line.split(",")[2]
     loss_percentage = loss_stats.split("%")[0]
-    return loss_percentage
+    return float(loss_percentage)
+
+
+def parse_ip_link(stdout):
+    # ip link output looks like this:
+    # 1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode
+    # DEFAULT group default qlen 1000
+    # link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    # 2: ens192: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode
+    # DEFAULT group default qlen 1000
+    # link/ether 00:50:56:00:fc:8c brd ff:ff:ff:ff:ff:ff
+
+    lines = stdout.splitlines()
+    netem_line = [line for line in lines if "netem" in line][0]
+    # Split on @, take left side, split on :, take right side, and trim spaces
+    interface = netem_line.split('@', 1)[0].split(':')[1].strip()
+    return interface
+
+
+def parse_tc_show(stdout):
+    # tc show output looks similar to this:
+    # qdisc netem 1: root refcnt 2 limit 5 delay 1.0s
+    # there could be multiple lines if multiple qdiscs are present
+
+    lines = stdout.splitlines()
+    netem_line = [line for line in lines if "netem" in line][0]
+    netem_split = netem_line.split(' ')
+    limit_index =netem_split.index("limit")
+    # Limit value directly follows the string limit
+    limit_value = netem_split[limit_index + 1]
+    return int(limit_value)
 
 
 async def annotate_pod(ops_test, kubeconfig, pod, namespace, annotation):
