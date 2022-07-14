@@ -59,8 +59,8 @@ def worker_node(client):
 
 @pytest.fixture(scope="module")
 async def gateway_server(ops_test):
-    cmd = "juju run --unit ubuntu/0 -- sudo apt install -y iperf3"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    cmd = "run --unit ubuntu/0 -- sudo apt install -y iperf3"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to install iperf3: {(stdout or stderr).strip()}"
 
     iperf3_cmd = "iperf3 -s --daemon"
@@ -79,16 +79,15 @@ async def gateway_server(ops_test):
 @pytest.fixture()
 def gateway_client_pod(client, worker_node, subnet_resource):
     log.info("Creating gateway QoS-related resources ...")
-    path = Path.cwd() / "tests/data/gateway_qos.yaml"
-    with open(path) as f:
-        for obj in codecs.load_all_yaml(f):
-            if obj.kind == "Subnet":
-                obj.spec["gatewayNode"] = worker_node.metadata.name
-            if obj.kind == "Namespace":
-                namespace = obj.metadata.name
-            if obj.kind == "Pod":
-                pod_name = obj.metadata.name
-            client.create(obj)
+    path = Path("tests/data/gateway_qos.yaml")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        if obj.kind == "Subnet":
+            obj.spec["gatewayNode"] = worker_node.metadata.name
+        if obj.kind == "Namespace":
+            namespace = obj.metadata.name
+        if obj.kind == "Pod":
+            pod_name = obj.metadata.name
+        client.create(obj)
 
     client_pod = client.get(Pod, name=pod_name, namespace=namespace)
     # wait for pod to come up
@@ -102,11 +101,10 @@ def gateway_client_pod(client, worker_node, subnet_resource):
     yield client_pod
 
     log.info("Deleting gateway QoS-related resources ...")
-    with open(path) as f:
-        for obj in codecs.load_all_yaml(f):
-            client.delete(
-                type(obj), obj.metadata.name, namespace=obj.metadata.namespace
-            )
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.delete(
+            type(obj), obj.metadata.name, namespace=obj.metadata.namespace
+        )
 
 
 @pytest.fixture()
