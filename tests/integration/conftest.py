@@ -102,9 +102,7 @@ def gateway_client_pod(client, worker_node, subnet_resource):
 
     log.info("Deleting gateway QoS-related resources ...")
     for obj in codecs.load_all_yaml(path.read_text()):
-        client.delete(
-            type(obj), obj.metadata.name, namespace=obj.metadata.namespace
-        )
+        client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
 
 
 @pytest.fixture()

@@ -1,8 +1,8 @@
-import time
 from math import isclose
 from pathlib import Path
 from pytest_operator.plugin import OpsTest
 
+import asyncio
 import shlex
 import pytest
 import logging
