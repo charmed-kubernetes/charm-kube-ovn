@@ -1,3 +1,4 @@
+import time
 from math import isclose
 from pathlib import Path
 from pytest_operator.plugin import OpsTest
@@ -217,6 +218,10 @@ async def test_gateway_qos(
 
     await annotate_obj(client, worker_node, rate_annotations)
 
+    # We need to wait a little bit for OVN to do its thing
+    # after applying the annotations
+    time.sleep(30)
+
     log.info("Testing node-level ingress bandwidth...")
     ingress_bw = await run_external_bandwidth_test(
         ops_test,
@@ -232,7 +237,7 @@ async def test_gateway_qos(
     egress_bw = await run_external_bandwidth_test(
         ops_test, gateway_server, gateway_client_pod, namespace, kubeconfig
     )
-    assert isclose(egress_bw, 30.0, rel_tol=0.10)
+    assert isclose(egress_bw, 30, rel_tol=0.10)
 
 
 def parse_iperf_result(output):
