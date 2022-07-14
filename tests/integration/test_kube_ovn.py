@@ -8,6 +8,11 @@ import pytest
 import logging
 import re
 import subprocess
+import time
+import json
+
+from ipaddress import ip_address, ip_network
+
 
 log = logging.getLogger(__name__)
 
@@ -26,6 +31,7 @@ async def test_build_and_deploy(ops_test: OpsTest):
     overlays = [
         ops_test.Bundle("kubernetes-core", channel="edge"),
         Path("tests/data/charm.yaml"),
+        Path("tests/data/vsphere-overlay.yaml"),
     ]
 
     log.info("Rendering overlays...")
@@ -35,7 +41,7 @@ async def test_build_and_deploy(ops_test: OpsTest):
 
     log.info("Deploy charm...")
     model = ops_test.model_full_name
-    cmd = f"juju deploy -m {model} {bundle} " + " ".join(
+    cmd = f"juju deploy -m {model} {bundle} --trust " + " ".join(
         f"--overlay={f}" for f in overlays
     )
 
@@ -238,6 +244,57 @@ async def test_gateway_qos(
         ops_test, gateway_server, gateway_client_pod, namespace, kubeconfig
     )
     assert isclose(egress_bw, 30, rel_tol=0.10)
+
+
+async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
+    manifest_path = "tests/data/test-multi-nic-ipam.yaml"
+    await kubectl("apply", "-f", manifest_path)
+
+    deadline = time.time() + 600
+    while True:
+        try:
+            await kubectl("exec", "test-multi-nic-ipam", "--", "apt-get", "update")
+            await kubectl(
+                "exec",
+                "test-multi-nic-ipam",
+                "--",
+                "apt-get",
+                "install",
+                "-y",
+                "iproute2",
+            )
+            ip_addr_output = await kubectl(
+                "exec", "test-multi-nic-ipam", "--", "ip", "-j", "addr"
+            )
+            break
+        except subprocess.CalledProcessError:
+            if time.time() > deadline:
+                raise
+        await asyncio.sleep(1)
+
+    ifaces = json.loads(ip_addr_output)
+    iface_addrs = {
+        iface["ifname"]: [
+            addr for addr in iface["addr_info"] if addr["family"] == "inet"
+        ]
+        for iface in ifaces
+    }
+
+    assert set(iface_addrs) == set(["lo", "eth0", "net1"])
+
+    assert len(iface_addrs["lo"]) == 1
+    assert iface_addrs["lo"][0]["prefixlen"] == 8
+    assert iface_addrs["lo"][0]["local"] == "127.0.0.1"
+
+    assert len(iface_addrs["eth0"]) == 1
+    assert iface_addrs["eth0"][0]["prefixlen"] == 16
+    assert ip_address(iface_addrs["eth0"][0]["local"]) in ip_network("192.168.0.0/16")
+
+    assert len(iface_addrs["net1"]) == 1
+    assert iface_addrs["net1"][0]["prefixlen"] == 24
+    assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
+
+    await kubectl("delete", "-f", manifest_path)
 
 
 def parse_iperf_result(output):

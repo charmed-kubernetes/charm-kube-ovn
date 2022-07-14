@@ -2,6 +2,10 @@ import time
 
 import pytest
 import logging
+import os
+import juju.utils
+import asyncio
+import subprocess
 
 from pathlib import Path
 import yaml
@@ -12,8 +16,18 @@ from lightkube.resources.core_v1 import Pod
 from lightkube.resources.core_v1 import Namespace
 from lightkube.resources.core_v1 import Node
 from lightkube.generic_resource import create_global_resource
+from random import choices
+from string import ascii_lowercase, digits
 
 log = logging.getLogger(__name__)
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--k8s-cloud",
+        action="store",
+        help="Juju kubernetes cloud to reuse; if not provided, will generate a new cloud",
+    )
 
 
 @pytest.fixture(scope="module")
@@ -141,6 +155,144 @@ def iperf3_pods(client):
         time.sleep(5)
 
     log.info("iperf3 cleanup finished")
+
+
+@pytest.fixture(scope="module")
+def kubectl(kubeconfig):
+    async def f(*args):
+        cmd = ["kubectl", "--kubeconfig", str(kubeconfig)] + list(args)
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE)
+        output, _ = await process.communicate()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(
+                returncode=process.returncode, cmd=cmd, output=output
+            )
+        return output
+
+    return f
+
+
+@pytest.fixture(scope="module")
+async def k8s_storage(kubectl):
+    await kubectl("apply", "-f", "tests/data/vsphere-storageclass.yaml")
+
+
+@pytest.fixture(scope="module")
+def module_name(request):
+    return request.module.__name__.replace("_", "-")
+
+
+@pytest.fixture(scope="module")
+async def k8s_cloud(k8s_storage, kubeconfig, module_name, ops_test, request):
+    """Use an existing k8s-cloud or create a k8s-cloud
+    for deploying a new k8s model into"""
+    cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
+    controller = await ops_test.model.get_controller()
+    try:
+        current_clouds = await controller.clouds()
+        if f"cloud-{cloud_name}" in current_clouds.clouds:
+            yield cloud_name
+            return
+    finally:
+        await controller.disconnect()
+
+    with ops_test.model_context("main"):
+        log.info(f"Adding cloud '{cloud_name}'...")
+        os.environ["KUBECONFIG"] = str(kubeconfig)
+        await ops_test.juju(
+            "add-k8s",
+            cloud_name,
+            f"--controller={ops_test.controller_name}",
+            "--client",
+            check=True,
+            fail_msg=f"Failed to add-k8s {cloud_name}",
+        )
+    yield cloud_name
+
+    with ops_test.model_context("main"):
+        log.info(f"Removing cloud '{cloud_name}'...")
+        await ops_test.juju(
+            "remove-cloud",
+            cloud_name,
+            "--controller",
+            ops_test.controller_name,
+            "--client",
+            check=True,
+        )
+
+
+@pytest.fixture(scope="module")
+async def k8s_model(k8s_cloud, ops_test):
+    model_alias = "k8s-model"
+    log.info("Creating k8s model ...")
+    # Create model with Juju CLI to work around a python-libjuju bug
+    # https://github.com/juju/python-libjuju/issues/603
+    model_name = "test-kube-ovn-" + "".join(choices(ascii_lowercase + digits, k=4))
+    await ops_test.juju(
+        "add-model",
+        f"--controller={ops_test.controller_name}",
+        model_name,
+        k8s_cloud,
+        "--no-switch",
+    )
+    model = await ops_test.track_model(
+        model_alias,
+        model_name=model_name,
+        cloud_name=k8s_cloud,
+        credential_name=k8s_cloud,
+        keep=False,
+    )
+    model_uuid = model.info.uuid
+    yield model, model_alias
+    timeout = 5 * 60
+    await ops_test.forget_model(model_alias, timeout=timeout, allow_failure=False)
+
+    async def model_removed():
+        _, stdout, stderr = await ops_test.juju("models", "--format", "yaml")
+        if _ != 0:
+            return False
+        model_list = yaml.safe_load(stdout)["models"]
+        which = [m for m in model_list if m["model-uuid"] == model_uuid]
+        return len(which) == 0
+
+    log.info("Removing k8s model")
+    await juju.utils.block_until_with_coroutine(model_removed, timeout=timeout)
+    # Update client's model cache
+    await ops_test.juju("models")
+    log.info("k8s model removed")
+
+
+@pytest.fixture(scope="module")
+async def multus_installed(ops_test, k8s_model):
+    _, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias) as model:
+        await model.deploy(entity_url="multus", channel="edge")
+        await model.block_until(lambda: "multus" in model.applications, timeout=60)
+        await model.wait_for_idle(status="active", timeout=60 * 60)
+
+    # need to wait until all kubernetes-worker units have multus CNI config installed
+    deadline = time.time() + 600
+    for unit in ops_test.model.applications["kubernetes-worker"].units:
+        log.info("waiting for Multus config on unit %s" % unit.name)
+        while time.time() < deadline:
+            rc, _, _ = await ops_test.juju(
+                "ssh",
+                "-m",
+                ops_test.model_full_name,
+                unit.name,
+                "--",
+                "sudo",
+                "ls",
+                "/etc/cni/net.d",
+                "|",
+                "grep",
+                "multus",
+            )
+            if rc == 0:
+                break
+            await asyncio.sleep(1)
+        else:
+            pytest.fail("timed out waiting for Multus config on unit %s" % unit.name)
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
