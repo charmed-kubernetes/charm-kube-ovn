@@ -20,7 +20,6 @@ kind: Namespace
 metadata:
   name: centralized-ns
 ---
-# used for running an iperf3 client manually using kubectl exec
 apiVersion: v1
 kind: Pod
 metadata:
