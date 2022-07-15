@@ -4,6 +4,7 @@ description: kube-ovn
 subordinate: true
 series:
   - focal
+  - jammy
 requires:
   cni:
     interface: kubernetes-cni
