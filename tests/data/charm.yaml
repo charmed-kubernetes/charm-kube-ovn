@@ -10,6 +10,9 @@ applications:
     charm: {{charm}}
     resources:
       kubectl-ko: {{plugin}}
+  ubuntu:
+    charm: ubuntu
+    num_units: 1
 relations:
 - - kube-ovn:cni
   - kubernetes-control-plane:cni

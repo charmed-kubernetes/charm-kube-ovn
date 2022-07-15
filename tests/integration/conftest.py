@@ -4,11 +4,14 @@ import pytest
 import logging
 
 from pathlib import Path
+import yaml
+import shlex
 from lightkube import Client, codecs, KubeConfig
 from lightkube.resources.apps_v1 import DaemonSet
 from lightkube.resources.core_v1 import Pod
 from lightkube.resources.core_v1 import Namespace
-
+from lightkube.resources.core_v1 import Node
+from lightkube.generic_resource import create_global_resource
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +42,67 @@ async def client(kubeconfig):
         trust_env=False,
     )
     yield client
+
+
+@pytest.fixture(scope="module")
+def subnet_resource(client):
+    return create_global_resource("kubeovn.io", "v1", "Subnet", "subnets")
+
+
+@pytest.fixture(scope="module")
+def worker_node(client):
+    # Returns a worker node
+    for node in client.list(Node):
+        if node.metadata.labels["juju-application"] == "kubernetes-worker":
+            return node
+
+
+@pytest.fixture(scope="module")
+async def gateway_server(ops_test):
+    cmd = "run --unit ubuntu/0 -- sudo apt install -y iperf3"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    assert rc == 0, f"Failed to install iperf3: {(stdout or stderr).strip()}"
+
+    iperf3_cmd = "iperf3 -s --daemon"
+    cmd = f"juju run --unit ubuntu/0 -- {iperf3_cmd}"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to run iperf3 server: {(stdout or stderr).strip()}"
+
+    cmd = "juju show-unit ubuntu/0"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to get ubuntu/0 unit data: {(stdout or stderr).strip()}"
+
+    unit_data = yaml.safe_load(stdout)
+    return unit_data["ubuntu/0"]["public-address"]
+
+
+@pytest.fixture()
+def gateway_client_pod(client, worker_node, subnet_resource):
+    log.info("Creating gateway QoS-related resources ...")
+    path = Path("tests/data/gateway_qos.yaml")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        if obj.kind == "Subnet":
+            obj.spec["gatewayNode"] = worker_node.metadata.name
+        if obj.kind == "Namespace":
+            namespace = obj.metadata.name
+        if obj.kind == "Pod":
+            pod_name = obj.metadata.name
+        client.create(obj)
+
+    client_pod = client.get(Pod, name=pod_name, namespace=namespace)
+    # wait for pod to come up
+    client.wait(
+        Pod,
+        client_pod.metadata.name,
+        for_conditions=["Ready"],
+        namespace=namespace,
+    )
+
+    yield client_pod
+
+    log.info("Deleting gateway QoS-related resources ...")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
 
 
 @pytest.fixture()

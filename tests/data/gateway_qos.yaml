@@ -1,0 +1,33 @@
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: centralized
+spec:
+  protocol: IPv4
+  cidrBlock: 10.166.0.0/16
+  default: false
+  excludeIps:
+  - 10.166.0.1
+  gateway: 10.166.0.1
+  gatewayType: centralized
+  gatewayNode: "a-node"
+  natOutgoing: true
+  namespaces:
+  - centralized-ns
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: centralized-ns
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-client
+  namespace: centralized-ns
+  labels:
+    app.kubernetes.io/name: perf-client
+spec:
+  containers:
+  - name: perf-client
+    image: rocks.canonical.com/cdk/kubeovn/perf:latest
