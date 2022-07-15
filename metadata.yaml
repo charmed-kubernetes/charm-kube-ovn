@@ -17,3 +17,6 @@ resources:
     filename: kubectl-ko
     description: |
       kubectl plugin to help better diagnose container network.
+provides:
+  metrics-endpoint:
+    interface: prometheus_scrape
