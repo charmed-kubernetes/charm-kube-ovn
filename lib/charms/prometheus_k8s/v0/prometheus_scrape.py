@@ -311,6 +311,7 @@ of Metrics provider charms hold eponymous information.
 
 """  # noqa: W505
 
+import contextlib
 import ipaddress
 import json
 import logging
@@ -1634,7 +1635,9 @@ class MetricsEndpointProvider(Object):
         event is actually needed.
         """
         for relation in self._charm.model.relations[self._relation_name]:
-            relation.data[self._charm.unit]["prometheus_scrape_unit_address"] = socket.getfqdn()
+            relation.data[self._charm.unit]["prometheus_scrape_unit_address"] = str(
+                self._charm.model.get_binding(relation).network.bind_address
+            )
             relation.data[self._charm.unit]["prometheus_scrape_unit_name"] = str(
                 self._charm.model.unit.name
             )

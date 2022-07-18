@@ -39,32 +39,15 @@ class KubeOvnCharm(CharmBase):
         self.framework.observe(
             self.on.kube_ovn_relation_changed, self.on_kube_ovn_relation_changed
         )
-        self.framework.observe(self.on.metrics_endpoint_relation_created, self.on_metrics_endpoint_relation_created)
         self.framework.observe(self.on.config_changed, self.on_config_changed)
         self.framework.observe(self.on.install, self.on_install)
         self.framework.observe(self.on.remove, self.on_remove)
         self.framework.observe(self.on.update_status, self.on_update_status)
         self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
         jobs = [{
-            "static_configs": [{"targets":["*:10665"]}]
+            "static_configs": [{"targets":["*:8080", "*:10660", "*:10665"]}]
         }]
         self.monitoring = MetricsEndpointProvider(self, jobs=jobs)
-
-    def on_metrics_endpoint_relation_created(self, event):
-        rel = self.model.get_relation("metrics-endpoint")
-        network = self.model.get_binding(rel).network
-        log.info(f"Creating Jobs for: {network.ingress_address}")
-        ports = ["8080", "10660", "10665"]
-        targets = [f"{network.ingress_address}:{port}" for port in ports]
-        targets.append("*:10665")
-
-        jobs = [{
-            "static_configs": [{"targets":targets}]
-        }]
-        log.info(self.monitoring._jobs)
-        self.monitoring._jobs = jobs
-        log.info(self.monitoring._jobs)
-
 
     def add_container_args(self, container, args, command=False):
         key = "command" if command else "args"
