@@ -1,8 +1,11 @@
 import time
-
+import os
+import json
 import pytest
+import pytest_asyncio
 import logging
-
+import juju.utils
+from juju.tag import untag
 from pathlib import Path
 import yaml
 import shlex
@@ -14,6 +17,15 @@ from lightkube.resources.core_v1 import Node
 from lightkube.generic_resource import create_global_resource
 
 log = logging.getLogger(__name__)
+
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--k8s-cloud",
+        action="store",
+        help="Juju kubernetes cloud to reuse; if not provided, will create a new cloud",
+    )
 
 
 @pytest.fixture(scope="module")
@@ -152,3 +164,168 @@ def wait_daemonset(client: Client, namespace, name, pods_ready):
         status = obj.status.to_dict()
         if status["numberReady"] == pods_ready:
             return
+
+
+@pytest.fixture(scope="module")
+def module_name(request):
+    return request.module.__name__.replace("_", "-")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def k8s_cloud(kubeconfig, ops_test, request, module_name):
+    """Use an existing k8s-cloud or create a k8s-cloud
+    for deploying a new k8s model into"""
+    cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
+    controller = await ops_test.model.get_controller()
+    current_clouds = await controller.clouds()
+    if f"cloud-{cloud_name}" in current_clouds.clouds:
+        yield cloud_name
+        return
+
+    with ops_test.model_context("main"):
+        log.info(f"Adding cloud '{cloud_name}'...")
+        os.environ["KUBECONFIG"] = kubeconfig
+        await ops_test.juju(
+            "add-k8s",
+            cloud_name,
+            "--skip-storage",
+            f"--controller={ops_test.controller_name}",
+            "--client",
+            check=True,
+            fail_msg=f"Failed to add-k8s {cloud_name}",
+        )
+    yield cloud_name
+
+    with ops_test.model_context("main"):
+        log.info(f"Removing cloud '{cloud_name}'...")
+        await ops_test.juju(
+            "remove-cloud",
+            cloud_name,
+            "--controller",
+            ops_test.controller_name,
+            "--client",
+            check=True,
+        )
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_model(k8s_cloud, ops_test):
+    model_alias = "grafana-model"
+    log.info("Creating Grafana model ...")
+    model = await ops_test.track_model(
+        model_alias, cloud_name=k8s_cloud, credential_name=k8s_cloud
+    )
+    model_uuid = model.info.uuid
+    yield model, model_alias
+    timeout = 5 * 60
+    await ops_test.forget_model(model_alias, timeout=timeout, allow_failure=False)
+
+    async def model_removed():
+        _, stdout, stderr = await ops_test.juju("models", "--format", "yaml")
+        if _ != 0:
+            return False
+        model_list = yaml.safe_load(stdout)["models"]
+        which = [m for m in model_list if m["model-uuid"] == model_uuid]
+        return len(which) == 0
+
+    log.info("Removing Grafana model")
+    await juju.utils.block_until_with_coroutine(model_removed, timeout=timeout)
+    # Update client's model cache
+    await ops_test.juju("models")
+    log.info("Grafana model removed")
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_app(ops_test, grafana_model):
+    grafana_model_obj, k8s_alias = grafana_model
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Deploying grafana-k8s ...")
+        await m.deploy(
+            entity_url="grafana-k8s",
+            trust=True,
+            channel='edge'
+        )
+
+        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60)
+        await m.wait_for_idle(status="active")
+
+    yield "grafana-k8s"
+
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Removing grafana-k8s application ...")
+        grafana_model_name = ops_test.model_name
+        cmd = "remove-application grafana-k8s --destroy-storage --force"
+        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+
+
+@pytest_asyncio.fixture(scope="module")
+async def related_grafana(ops_test, grafana_app, grafana_model):
+    grafana_model_obj, k8s_alias = grafana_model
+    app_name = grafana_app
+    machine_model_name = ops_test.model_name
+    model_owner = untag("user-", grafana_model_obj.info.owner_tag)
+    with ops_test.model_context(k8s_alias) as m:
+        offer, saas = None, None
+        log.info("Creating CMR offer for Grafana")
+        offer = await m.create_offer(f"{app_name}:grafana-dashboard")
+        grafana_model_name = ops_test.model_name
+
+    log.info("Consuming Grafana CMR offer")
+    log.info(f"{machine_model_name} consuming Grafana CMR offer from {grafana_model_name}")
+    saas = await ops_test.model.consume(
+        f"{model_owner}/{grafana_model_name}.{app_name}"
+    )
+    log.info("Relating grafana and kube-ovn...")
+    await ops_test.model.add_relation(
+        "kube-ovn", f"{app_name}:grafana-dashboard"
+    )
+    with ops_test.model_context(k8s_alias) as gf_model:
+        await gf_model.wait_for_idle(status="active")
+    await ops_test.model.wait_for_idle(status="active")
+    yield
+    with ops_test.model_context(k8s_alias) as m:
+        keep = ops_test.keep_model
+    if not keep:
+        try:
+            if saas:
+                log.info("Removing Grafana CMR consumer")
+                await ops_test.model.remove_saas(app_name)
+            if offer:
+                log.info("Removing Grafana CMR offer and relations")
+                await grafana_model_obj.remove_offer(
+                    f"{grafana_model_name}.{app_name}", force=True
+                )
+        except Exception:
+            log.exception("Error performing cleanup")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_password(ops_test, related_grafana, grafana_model, grafana_app):
+    grafana_model_obj, k8s_alias = grafana_model
+    with ops_test.model_context(k8s_alias) as m:
+        action = (
+            await ops_test.model.applications[grafana_app].units[0]
+            .run_action("get-admin-password")
+        )
+        action = await action.wait()
+    return action.results["admin-password"]
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_host(ops_test, related_grafana, grafana_model, grafana_app):
+    grafana_model_obj, k8s_alias = grafana_model
+    with ops_test.model_context(k8s_alias) as m:
+        status = await ops_test.model.get_status()
+    return status["applications"][grafana_app].public_address
+
+
+@pytest_asyncio.fixture(scope="module")
+async def expected_dashboard_titles():
+    grafana_dir = Path("src/grafana_dashboards")
+    grafana_files = [p for p in grafana_dir.iterdir() if p.is_file() and p.name.endswith('.json')]
+    titles = []
+    for path in grafana_files:
+        dashboard = json.loads(path.read_text())
+        titles.append(dashboard["title"])
+    return titles
+
+
