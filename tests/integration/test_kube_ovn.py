@@ -49,195 +49,195 @@ async def test_build_and_deploy(ops_test: OpsTest):
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 60)
 
 
-# async def test_kubectl_ko_plugin(ops_test: OpsTest):
-#     units = ops_test.model.applications["kube-ovn"].units
-#     machines = [u.machine.entity_id for u in units]
-#
-#     for m in machines:
-#         cmd = f"juju ssh {m} kubectl ko nbctl show"
-#         rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-#         assert (
-#             rc == 0
-#         ), f"Failed to execute kubectl-ko on machine:{m} {(stderr or stdout).strip()}"
-#
-#
-# async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
-#     server, test_pod, _ = iperf3_pods
-#     namespace = server.metadata.namespace
-#
-#     rate_values = {
-#         "ovn.kubernetes.io/ingress_rate": "10",
-#         "ovn.kubernetes.io/egress_rate": "5",
-#     }
-#     await annotate_obj(client, test_pod, rate_values)
-#
-#     log.info("Test ingress bandwidth...")
-#     ingress_bw = await run_bandwidth_test(
-#         ops_test, server, test_pod, namespace, kubeconfig
-#     )
-#     assert isclose(ingress_bw, 5.0, abs_tol=0.5)
-#
-#     log.info("Test egress bandwidth...")
-#     egress_bw = await run_bandwidth_test(
-#         ops_test, server, test_pod, namespace, kubeconfig, reverse=True
-#     )
-#     assert isclose(egress_bw, 10.0, abs_tol=0.5)
-#
-#
-# @pytest.mark.skip
-# async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
-#     """
-#     TODO: This test is not working as intended
-#     and must be fixed.
-#     """
-#
-#     server, pod_prior, pod_non_prior = iperf3_pods
-#     namespace = server.metadata.namespace
-#     server_ip = server.status.podIP
-#
-#     log.info("Setup iperf3 servers...")
-#     iperf3_cmd = 'sh -c "iperf3 -s -p 5101 --daemon && iperf3 -s -p 5102 --daemon"'
-#     cmd = (
-#         f"kubectl --kubeconfig {kubeconfig} "
-#         f"exec {server.metadata.name} -n {namespace} "
-#         f"-- {iperf3_cmd}"
-#     )
-#     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-#
-#     assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
-#
-#     new_priority_annotation = {"ovn.kubernetes.io/priority": f"{NEW_PRIORITY_HTB}"}
-#     await annotate_obj(client, pod_prior, new_priority_annotation)
-#
-#     low_priority_annotation = {"ovn.kubernetes.io/priority": f"{LOW_PRIORITY_HTB}"}
-#     await annotate_obj(client, pod_non_prior, low_priority_annotation)
-#
-#     cmd = []
-#     cmd.append(
-#         f"kubectl --kubeconfig {kubeconfig} "
-#         f"exec {pod_prior.metadata.name} "
-#         f"-n {namespace} "
-#         f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
-#     )
-#     cmd.append(
-#         f"kubectl --kubeconfig {kubeconfig} "
-#         f"exec {pod_non_prior.metadata.name} "
-#         f"-n {namespace} "
-#         f'-- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
-#     )
-#
-#     processes = []
-#     for c in cmd:
-#         p = subprocess.Popen(shlex.split(c), stdout=subprocess.PIPE)
-#         processes.append(p)
-#
-#     results = []
-#     for p in processes:
-#         p.wait()
-#         out, _ = p.communicate()
-#         results.append(out.decode("utf-8"))
-#
-#     prior_bw = parse_iperf_result(results[0])
-#     non_prior_bw = parse_iperf_result(results[1])
-#
-#     assert prior_bw > non_prior_bw
-#
-#
-# async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
-#     pinger, pingee, _ = iperf3_pods
-#     namespace = pinger.metadata.namespace
-#
-#     # ping once before the test, as the first ping delay takes a bit,
-#     # but subsequent pings work as expected
-#     # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
-#     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-#
-#     # latency is in ms
-#     latency = 1000
-#     latency_annotation = {"ovn.kubernetes.io/latency": f"{latency}"}
-#     await annotate_obj(client, pinger, latency_annotation)
-#
-#     log.info("Testing ping latency ...")
-#     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-#     average_latency = parse_ping_delay(stdout)
-#     assert isclose(average_latency, latency, rel_tol=0.05)
-#
-#
-# async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
-#     pinger, pingee, _ = iperf3_pods
-#     namespace = pinger.metadata.namespace
-#
-#     # Test loss before applying the annotation
-#     log.info("Testing ping loss ...")
-#     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-#     actual_loss = parse_ping_loss(stdout)
-#     assert actual_loss == 0
-#
-#     # Annotate and test again
-#     expected_loss = 100
-#     loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
-#     await annotate_obj(client, pinger, loss_annotation)
-#
-#     log.info("Testing ping loss ...")
-#     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-#     actual_loss = parse_ping_loss(stdout)
-#     assert actual_loss == expected_loss
-#
-#
-# async def test_pod_netem_limit(ops_test, kubeconfig, client, iperf3_pods):
-#     expected_limit = 100
-#     for pod in iperf3_pods:
-#         # Annotate all the pods so we dont have to worry about
-#         # which worker node we pick to check the qdisk
-#         limit_annotation = {"ovn.kubernetes.io/limit": f"{expected_limit}"}
-#         await annotate_obj(client, pod, limit_annotation)
-#
-#     log.info("Looking for kubernetes-worker/0 netem interface ...")
-#     cmd = "juju run --unit kubernetes-worker/0 -- ip link"
-#     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-#     assert rc == 0, f"Failed to run ip link: {(stdout or stderr).strip()}"
-#
-#     interface = parse_ip_link(stdout)
-#     log.info(f"Checking qdisk on interface {interface} for correct limit ...")
-#     cmd = f"juju run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
-#     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-#     assert rc == 0, f"Failed to run tc qdisc show: {(stdout or stderr).strip()}"
-#     actual_limit = parse_tc_show(stdout)
-#     assert actual_limit == expected_limit
-#
-#
-# async def test_gateway_qos(
-#     ops_test, kubeconfig, client, gateway_server, gateway_client_pod, worker_node
-# ):
-#     namespace = gateway_client_pod.metadata.namespace
-#
-#     rate_annotations = {
-#         "ovn.kubernetes.io/ingress_rate": "60",
-#         "ovn.kubernetes.io/egress_rate": "30",
-#     }
-#
-#     await annotate_obj(client, worker_node, rate_annotations)
-#
-#     # We need to wait a little bit for OVN to do its thing
-#     # after applying the annotations
-#     await asyncio.sleep(30)
-#
-#     log.info("Testing node-level ingress bandwidth...")
-#     ingress_bw = await run_external_bandwidth_test(
-#         ops_test,
-#         gateway_server,
-#         gateway_client_pod,
-#         namespace,
-#         kubeconfig,
-#         reverse=True,
-#     )
-#     assert isclose(ingress_bw, 60, rel_tol=0.10)
-#
-#     log.info("Testing node-level egress bandwidth...")
-#     egress_bw = await run_external_bandwidth_test(
-#         ops_test, gateway_server, gateway_client_pod, namespace, kubeconfig
-#     )
-#     assert isclose(egress_bw, 30, rel_tol=0.10)
+async def test_kubectl_ko_plugin(ops_test: OpsTest):
+    units = ops_test.model.applications["kube-ovn"].units
+    machines = [u.machine.entity_id for u in units]
+
+    for m in machines:
+        cmd = f"juju ssh {m} kubectl ko nbctl show"
+        rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+        assert (
+            rc == 0
+        ), f"Failed to execute kubectl-ko on machine:{m} {(stderr or stdout).strip()}"
+
+
+async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
+    server, test_pod, _ = iperf3_pods
+    namespace = server.metadata.namespace
+
+    rate_values = {
+        "ovn.kubernetes.io/ingress_rate": "10",
+        "ovn.kubernetes.io/egress_rate": "5",
+    }
+    await annotate_obj(client, test_pod, rate_values)
+
+    log.info("Test ingress bandwidth...")
+    ingress_bw = await run_bandwidth_test(
+        ops_test, server, test_pod, namespace, kubeconfig
+    )
+    assert isclose(ingress_bw, 5.0, abs_tol=0.5)
+
+    log.info("Test egress bandwidth...")
+    egress_bw = await run_bandwidth_test(
+        ops_test, server, test_pod, namespace, kubeconfig, reverse=True
+    )
+    assert isclose(egress_bw, 10.0, abs_tol=0.5)
+
+
+@pytest.mark.skip
+async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
+    """
+    TODO: This test is not working as intended
+    and must be fixed.
+    """
+
+    server, pod_prior, pod_non_prior = iperf3_pods
+    namespace = server.metadata.namespace
+    server_ip = server.status.podIP
+
+    log.info("Setup iperf3 servers...")
+    iperf3_cmd = 'sh -c "iperf3 -s -p 5101 --daemon && iperf3 -s -p 5102 --daemon"'
+    cmd = (
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {server.metadata.name} -n {namespace} "
+        f"-- {iperf3_cmd}"
+    )
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+
+    assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
+
+    new_priority_annotation = {"ovn.kubernetes.io/priority": f"{NEW_PRIORITY_HTB}"}
+    await annotate_obj(client, pod_prior, new_priority_annotation)
+
+    low_priority_annotation = {"ovn.kubernetes.io/priority": f"{LOW_PRIORITY_HTB}"}
+    await annotate_obj(client, pod_non_prior, low_priority_annotation)
+
+    cmd = []
+    cmd.append(
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {pod_prior.metadata.name} "
+        f"-n {namespace} "
+        f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
+    )
+    cmd.append(
+        f"kubectl --kubeconfig {kubeconfig} "
+        f"exec {pod_non_prior.metadata.name} "
+        f"-n {namespace} "
+        f'-- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
+    )
+
+    processes = []
+    for c in cmd:
+        p = subprocess.Popen(shlex.split(c), stdout=subprocess.PIPE)
+        processes.append(p)
+
+    results = []
+    for p in processes:
+        p.wait()
+        out, _ = p.communicate()
+        results.append(out.decode("utf-8"))
+
+    prior_bw = parse_iperf_result(results[0])
+    non_prior_bw = parse_iperf_result(results[1])
+
+    assert prior_bw > non_prior_bw
+
+
+async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
+    pinger, pingee, _ = iperf3_pods
+    namespace = pinger.metadata.namespace
+
+    # ping once before the test, as the first ping delay takes a bit,
+    # but subsequent pings work as expected
+    # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
+
+    # latency is in ms
+    latency = 1000
+    latency_annotation = {"ovn.kubernetes.io/latency": f"{latency}"}
+    await annotate_obj(client, pinger, latency_annotation)
+
+    log.info("Testing ping latency ...")
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
+    average_latency = parse_ping_delay(stdout)
+    assert isclose(average_latency, latency, rel_tol=0.05)
+
+
+async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
+    pinger, pingee, _ = iperf3_pods
+    namespace = pinger.metadata.namespace
+
+    # Test loss before applying the annotation
+    log.info("Testing ping loss ...")
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
+    actual_loss = parse_ping_loss(stdout)
+    assert actual_loss == 0
+
+    # Annotate and test again
+    expected_loss = 100
+    loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
+    await annotate_obj(client, pinger, loss_annotation)
+
+    log.info("Testing ping loss ...")
+    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
+    actual_loss = parse_ping_loss(stdout)
+    assert actual_loss == expected_loss
+
+
+async def test_pod_netem_limit(ops_test, kubeconfig, client, iperf3_pods):
+    expected_limit = 100
+    for pod in iperf3_pods:
+        # Annotate all the pods so we dont have to worry about
+        # which worker node we pick to check the qdisk
+        limit_annotation = {"ovn.kubernetes.io/limit": f"{expected_limit}"}
+        await annotate_obj(client, pod, limit_annotation)
+
+    log.info("Looking for kubernetes-worker/0 netem interface ...")
+    cmd = "juju run --unit kubernetes-worker/0 -- ip link"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to run ip link: {(stdout or stderr).strip()}"
+
+    interface = parse_ip_link(stdout)
+    log.info(f"Checking qdisk on interface {interface} for correct limit ...")
+    cmd = f"juju run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to run tc qdisc show: {(stdout or stderr).strip()}"
+    actual_limit = parse_tc_show(stdout)
+    assert actual_limit == expected_limit
+
+
+async def test_gateway_qos(
+    ops_test, kubeconfig, client, gateway_server, gateway_client_pod, worker_node
+):
+    namespace = gateway_client_pod.metadata.namespace
+
+    rate_annotations = {
+        "ovn.kubernetes.io/ingress_rate": "60",
+        "ovn.kubernetes.io/egress_rate": "30",
+    }
+
+    await annotate_obj(client, worker_node, rate_annotations)
+
+    # We need to wait a little bit for OVN to do its thing
+    # after applying the annotations
+    await asyncio.sleep(30)
+
+    log.info("Testing node-level ingress bandwidth...")
+    ingress_bw = await run_external_bandwidth_test(
+        ops_test,
+        gateway_server,
+        gateway_client_pod,
+        namespace,
+        kubeconfig,
+        reverse=True,
+    )
+    assert isclose(ingress_bw, 60, rel_tol=0.10)
+
+    log.info("Testing node-level egress bandwidth...")
+    egress_bw = await run_external_bandwidth_test(
+        ops_test, gateway_server, gateway_client_pod, namespace, kubeconfig
+    )
+    assert isclose(egress_bw, 30, rel_tol=0.10)
 
 
 async def test_grafana(grafana_host, grafana_password, expected_dashboard_titles):
