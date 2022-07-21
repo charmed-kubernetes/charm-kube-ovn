@@ -1,10 +1,11 @@
 import urllib.request
 import json
 from pathlib import Path
-import os
 
 grafana_dir = Path("src/grafana_dashboards")
-url = "https://api.github.com/repos/kubeovn/kube-ovn/contents/dist/monitoring?ref=master"
+url = (
+    "https://api.github.com/repos/kubeovn/kube-ovn/contents/dist/monitoring?ref=master"
+)
 opener = urllib.request.build_opener()
 response = urllib.request.urlretrieve(url)
 with open(response[0], "r") as f:
@@ -23,20 +24,19 @@ with open(response[0], "r") as f:
 # We must make the appropriate replacement ourselves. The prometheus datasource variable expected by
 # the COS grafana charm is named prometheusds.
 ds = "${prometheusds}"
-grafana_files = [p for p in grafana_dir.iterdir()
-                 if (p.is_file() and p.name.endswith(".json"))]
+grafana_files = [
+    p for p in grafana_dir.iterdir() if (p.is_file() and p.name.endswith(".json"))
+]
 for file in grafana_files:
     json_data = json.loads(file.read_text())
     templating = json_data["templating"]
     templates = templating["list"]
     for template in templates:
         if "datasource" in template:
-            name = template['name']
+            name = template["name"]
             print(f"Replacing template {name} datasource in {file}...")
             template["datasource"] = ds
 
     with open(file, "w") as jsonFile:
         print(f"Saving {file}")
         json.dump(json_data, jsonFile, indent=2)
-
-

@@ -308,21 +308,12 @@ def wait_daemonset(client: Client, namespace, name, pods_ready):
             return
 
 
-@pytest.fixture(scope="module")
-def module_name(request):
-    return request.module.__name__.replace("_", "-")
-
-
 @pytest_asyncio.fixture(scope="module")
 async def grafana_app(ops_test, k8s_model):
     grafana_model_obj, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as m:
         log.info("Deploying grafana-k8s ...")
-        await m.deploy(
-            entity_url="grafana-k8s",
-            trust=True,
-            channel='edge'
-        )
+        await m.deploy(entity_url="grafana-k8s", trust=True, channel="edge")
 
         await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60)
         await m.wait_for_idle(status="active")
@@ -348,14 +339,14 @@ async def related_grafana(ops_test, grafana_app, k8s_model):
         grafana_model_name = ops_test.model_name
 
     log.info("Consuming Grafana CMR offer")
-    log.info(f"{machine_model_name} consuming Grafana CMR offer from {grafana_model_name}")
+    log.info(
+        f"{machine_model_name} consuming Grafana CMR offer from {grafana_model_name}"
+    )
     saas = await ops_test.model.consume(
         f"{model_owner}/{grafana_model_name}.{app_name}"
     )
     log.info("Relating grafana and kube-ovn...")
-    await ops_test.model.add_relation(
-        "kube-ovn", f"{app_name}:grafana-dashboard"
-    )
+    await ops_test.model.add_relation("kube-ovn", f"{app_name}:grafana-dashboard")
     with ops_test.model_context(k8s_alias) as gf_model:
         await gf_model.wait_for_idle(status="active")
     await ops_test.model.wait_for_idle(status="active")
@@ -379,9 +370,10 @@ async def related_grafana(ops_test, grafana_app, k8s_model):
 @pytest_asyncio.fixture(scope="module")
 async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
     grafana_model_obj, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias) as m:
+    with ops_test.model_context(k8s_alias):
         action = (
-            await ops_test.model.applications[grafana_app].units[0]
+            await ops_test.model.applications[grafana_app]
+            .units[0]
             .run_action("get-admin-password")
         )
         action = await action.wait()
@@ -391,7 +383,7 @@ async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
 @pytest_asyncio.fixture(scope="module")
 async def grafana_host(ops_test, related_grafana, k8s_model, grafana_app):
     grafana_model_obj, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias) as m:
+    with ops_test.model_context(k8s_alias):
         status = await ops_test.model.get_status()
     return status["applications"][grafana_app].public_address
 
@@ -399,11 +391,11 @@ async def grafana_host(ops_test, related_grafana, k8s_model, grafana_app):
 @pytest_asyncio.fixture(scope="module")
 async def expected_dashboard_titles():
     grafana_dir = Path("src/grafana_dashboards")
-    grafana_files = [p for p in grafana_dir.iterdir() if p.is_file() and p.name.endswith('.json')]
+    grafana_files = [
+        p for p in grafana_dir.iterdir() if p.is_file() and p.name.endswith(".json")
+    ]
     titles = []
     for path in grafana_files:
         dashboard = json.loads(path.read_text())
         titles.append(dashboard["title"])
     return titles
-
-

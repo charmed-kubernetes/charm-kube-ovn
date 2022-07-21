@@ -778,7 +778,7 @@ def test_grafana_dashboards(install_kubectl_plugin, harness):
     grafana_files = [p.name for p in grafana_dir.iterdir() if p.is_file()]
     expected_keys = []
     for file_with_extension in grafana_files:
-        if file_with_extension.endswith('.json'):
+        if file_with_extension.endswith(".json"):
             name_only = file_with_extension[:-5]
             key = "file:" + name_only
             expected_keys.append(key)

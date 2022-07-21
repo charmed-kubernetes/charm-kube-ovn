@@ -439,4 +439,3 @@ async def annotate_obj(client, obj, annotation_dict):
     client.patch(
         type(obj), obj.metadata.name, obj, namespace=obj.metadata.namespace, force=True
     )
-
