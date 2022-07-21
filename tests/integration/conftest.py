@@ -252,7 +252,6 @@ async def grafana_app(ops_test, grafana_model):
 
     with ops_test.model_context(k8s_alias) as m:
         log.info("Removing grafana-k8s application ...")
-        grafana_model_name = ops_test.model_name
         cmd = "remove-application grafana-k8s --destroy-storage --force"
         rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
 
