@@ -246,9 +246,12 @@ async def test_gateway_qos(
     assert isclose(egress_bw, 30, rel_tol=0.10)
 
 
-async def test_grafana(grafana_host, grafana_password, expected_dashboard_titles):
-    grafana = Grafana(host=grafana_host, pw=grafana_password)
-    while not grafana.is_ready():
+async def test_grafana(
+    ops_test, grafana_host, grafana_password, expected_dashboard_titles
+):
+    # port is defined in grafana_service.yaml
+    grafana = Grafana(ops_test, host=grafana_host, port=30123, pw=grafana_password)
+    while not await grafana.is_ready():
         log.info("Waiting for Grafana to be ready ...")
         await asyncio.sleep(5)
     dashboards = await grafana.dashboards_all()

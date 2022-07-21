@@ -381,11 +381,34 @@ async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_host(ops_test, related_grafana, k8s_model, grafana_app):
-    grafana_model_obj, k8s_alias = k8s_model
+async def grafana_service(ops_test, client, related_grafana, k8s_model, grafana_app):
+    _, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias):
-        status = await ops_test.model.get_status()
-    return status["applications"][grafana_app].public_address
+        grafana_model_name = ops_test.model_name
+
+    log.info("Creating Grafana service ...")
+    path = Path("tests/data/grafana_service.yaml")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj, namespace=grafana_model_name)
+
+    yield
+
+    log.info("Deleting Grafana service ...")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(type(obj), obj.metadata.name, namespace=grafana_model_name)
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_host(
+    ops_test, grafana_service, worker_node, related_grafana, k8s_model, grafana_app
+):
+    worker_ip = None
+    for address in worker_node.status.addresses:
+        if address.type == "ExternalIP":
+            worker_ip = address.address
+    return worker_ip
 
 
 @pytest_asyncio.fixture(scope="module")
