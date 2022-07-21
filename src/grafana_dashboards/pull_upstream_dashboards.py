@@ -4,6 +4,7 @@ from pathlib import Path
 
 grafana_dir = Path("src/grafana_dashboards")
 url = (
+    # wokeignore:rule=master
     "https://api.github.com/repos/kubeovn/kube-ovn/contents/dist/monitoring?ref=master"
 )
 opener = urllib.request.build_opener()
