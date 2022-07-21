@@ -44,9 +44,21 @@ class KubeOvnCharm(CharmBase):
         self.framework.observe(self.on.remove, self.on_remove)
         self.framework.observe(self.on.update_status, self.on_update_status)
         self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
-        jobs = [{
-            "static_configs": [{"targets":["*:8080", "*:10660", "*:10665"]}]
-        }]
+        jobs = [
+            {"job_name": "kube-ovn-cni", "static_configs": [{"targets": ["*:10665"]}]},
+            {
+                "job_name": "kube-ovn-controller",
+                "static_configs": [{"targets": ["*:10660"]}],
+            },
+            {
+                "job_name": "kube-ovn-monitor",
+                "static_configs": [{"targets": ["*:10661"]}],
+            },
+            {
+                "job_name": "kube-ovn-pinger",
+                "static_configs": [{"targets": ["*:8080"]}],
+            },
+        ]
         self.monitoring = MetricsEndpointProvider(self, jobs=jobs)
 
     def add_container_args(self, container, args, command=False):
