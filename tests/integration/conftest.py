@@ -1,11 +1,14 @@
 import time
 import os
+import juju.utils
+from juju.tag import untag
+import asyncio
+import subprocess
 import json
 import pytest
 import pytest_asyncio
 import logging
-import juju.utils
-from juju.tag import untag
+
 from pathlib import Path
 import yaml
 import shlex
@@ -15,16 +18,17 @@ from lightkube.resources.core_v1 import Pod
 from lightkube.resources.core_v1 import Namespace
 from lightkube.resources.core_v1 import Node
 from lightkube.generic_resource import create_global_resource
+from random import choices
+from string import ascii_lowercase, digits
 
 log = logging.getLogger(__name__)
-
 
 
 def pytest_addoption(parser):
     parser.addoption(
         "--k8s-cloud",
         action="store",
-        help="Juju kubernetes cloud to reuse; if not provided, will create a new cloud",
+        help="Juju kubernetes cloud to reuse; if not provided, will generate a new cloud",
     )
 
 
@@ -155,15 +159,24 @@ def iperf3_pods(client):
     log.info("iperf3 cleanup finished")
 
 
-def wait_daemonset(client: Client, namespace, name, pods_ready):
-    for _, obj in client.watch(
-        DaemonSet, namespace=namespace, fields={"metadata.name": name}
-    ):
-        if obj.status is None:
-            continue
-        status = obj.status.to_dict()
-        if status["numberReady"] == pods_ready:
-            return
+@pytest.fixture(scope="module")
+def kubectl(kubeconfig):
+    async def f(*args):
+        cmd = ["kubectl", "--kubeconfig", str(kubeconfig)] + list(args)
+        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE)
+        output, _ = await process.communicate()
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(
+                returncode=process.returncode, cmd=cmd, output=output
+            )
+        return output
+
+    return f
+
+
+@pytest.fixture(scope="module")
+async def k8s_storage(kubectl):
+    await kubectl("apply", "-f", "tests/data/vsphere-storageclass.yaml")
 
 
 @pytest.fixture(scope="module")
@@ -171,24 +184,26 @@ def module_name(request):
     return request.module.__name__.replace("_", "-")
 
 
-@pytest_asyncio.fixture(scope="module")
-async def k8s_cloud(kubeconfig, ops_test, request, module_name):
+@pytest.fixture(scope="module")
+async def k8s_cloud(k8s_storage, kubeconfig, module_name, ops_test, request):
     """Use an existing k8s-cloud or create a k8s-cloud
     for deploying a new k8s model into"""
     cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
     controller = await ops_test.model.get_controller()
-    current_clouds = await controller.clouds()
-    if f"cloud-{cloud_name}" in current_clouds.clouds:
-        yield cloud_name
-        return
+    try:
+        current_clouds = await controller.clouds()
+        if f"cloud-{cloud_name}" in current_clouds.clouds:
+            yield cloud_name
+            return
+    finally:
+        await controller.disconnect()
 
     with ops_test.model_context("main"):
         log.info(f"Adding cloud '{cloud_name}'...")
-        os.environ["KUBECONFIG"] = kubeconfig
+        os.environ["KUBECONFIG"] = str(kubeconfig)
         await ops_test.juju(
             "add-k8s",
             cloud_name,
-            "--skip-storage",
             f"--controller={ops_test.controller_name}",
             "--client",
             check=True,
@@ -208,12 +223,26 @@ async def k8s_cloud(kubeconfig, ops_test, request, module_name):
         )
 
 
-@pytest_asyncio.fixture(scope="module")
-async def grafana_model(k8s_cloud, ops_test):
-    model_alias = "grafana-model"
-    log.info("Creating Grafana model ...")
+@pytest.fixture(scope="module")
+async def k8s_model(k8s_cloud, ops_test):
+    model_alias = "k8s-model"
+    log.info("Creating k8s model ...")
+    # Create model with Juju CLI to work around a python-libjuju bug
+    # https://github.com/juju/python-libjuju/issues/603
+    model_name = "test-kube-ovn-" + "".join(choices(ascii_lowercase + digits, k=4))
+    await ops_test.juju(
+        "add-model",
+        f"--controller={ops_test.controller_name}",
+        model_name,
+        k8s_cloud,
+        "--no-switch",
+    )
     model = await ops_test.track_model(
-        model_alias, cloud_name=k8s_cloud, credential_name=k8s_cloud
+        model_alias,
+        model_name=model_name,
+        cloud_name=k8s_cloud,
+        credential_name=k8s_cloud,
+        keep=False,
     )
     model_uuid = model.info.uuid
     yield model, model_alias
@@ -228,15 +257,65 @@ async def grafana_model(k8s_cloud, ops_test):
         which = [m for m in model_list if m["model-uuid"] == model_uuid]
         return len(which) == 0
 
-    log.info("Removing Grafana model")
+    log.info("Removing k8s model")
     await juju.utils.block_until_with_coroutine(model_removed, timeout=timeout)
     # Update client's model cache
     await ops_test.juju("models")
-    log.info("Grafana model removed")
+    log.info("k8s model removed")
+
+
+@pytest.fixture(scope="module")
+async def multus_installed(ops_test, k8s_model):
+    _, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias) as model:
+        await model.deploy(entity_url="multus", channel="edge")
+        await model.block_until(lambda: "multus" in model.applications, timeout=60)
+        await model.wait_for_idle(status="active", timeout=60 * 60)
+
+    # need to wait until all kubernetes-worker units have multus CNI config installed
+    deadline = time.time() + 600
+    for unit in ops_test.model.applications["kubernetes-worker"].units:
+        log.info("waiting for Multus config on unit %s" % unit.name)
+        while time.time() < deadline:
+            rc, _, _ = await ops_test.juju(
+                "ssh",
+                "-m",
+                ops_test.model_full_name,
+                unit.name,
+                "--",
+                "sudo",
+                "ls",
+                "/etc/cni/net.d",
+                "|",
+                "grep",
+                "multus",
+            )
+            if rc == 0:
+                break
+            await asyncio.sleep(1)
+        else:
+            pytest.fail("timed out waiting for Multus config on unit %s" % unit.name)
+
+
+def wait_daemonset(client: Client, namespace, name, pods_ready):
+    for _, obj in client.watch(
+        DaemonSet, namespace=namespace, fields={"metadata.name": name}
+    ):
+        if obj.status is None:
+            continue
+        status = obj.status.to_dict()
+        if status["numberReady"] == pods_ready:
+            return
+
+
+@pytest.fixture(scope="module")
+def module_name(request):
+    return request.module.__name__.replace("_", "-")
+
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_app(ops_test, grafana_model):
-    grafana_model_obj, k8s_alias = grafana_model
+async def grafana_app(ops_test, k8s_model):
+    grafana_model_obj, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as m:
         log.info("Deploying grafana-k8s ...")
         await m.deploy(
@@ -257,8 +336,8 @@ async def grafana_app(ops_test, grafana_model):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def related_grafana(ops_test, grafana_app, grafana_model):
-    grafana_model_obj, k8s_alias = grafana_model
+async def related_grafana(ops_test, grafana_app, k8s_model):
+    grafana_model_obj, k8s_alias = k8s_model
     app_name = grafana_app
     machine_model_name = ops_test.model_name
     model_owner = untag("user-", grafana_model_obj.info.owner_tag)
@@ -298,8 +377,8 @@ async def related_grafana(ops_test, grafana_app, grafana_model):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_password(ops_test, related_grafana, grafana_model, grafana_app):
-    grafana_model_obj, k8s_alias = grafana_model
+async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
+    grafana_model_obj, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as m:
         action = (
             await ops_test.model.applications[grafana_app].units[0]
@@ -310,8 +389,8 @@ async def grafana_password(ops_test, related_grafana, grafana_model, grafana_app
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_host(ops_test, related_grafana, grafana_model, grafana_app):
-    grafana_model_obj, k8s_alias = grafana_model
+async def grafana_host(ops_test, related_grafana, k8s_model, grafana_app):
+    grafana_model_obj, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as m:
         status = await ops_test.model.get_status()
     return status["applications"][grafana_app].public_address
