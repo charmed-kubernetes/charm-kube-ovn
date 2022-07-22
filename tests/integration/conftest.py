@@ -305,7 +305,7 @@ async def multus_installed(ops_test, k8s_model):
         log.info(stdout)
         log.info(stderr)
         assert rc == 0
-        await m.block_until(lambda: "multus" not in m.applications, timeout=60 * 5)
+        await m.block_until(lambda: "multus" not in m.applications, timeout=60 * 10)
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
@@ -338,7 +338,9 @@ async def grafana_app(ops_test, k8s_model):
         log.info(stdout)
         log.info(stderr)
         assert rc == 0
-        await m.block_until(lambda: "grafana-k8s" not in m.applications, timeout=60 * 5)
+        await m.block_until(
+            lambda: "grafana-k8s" not in m.applications, timeout=60 * 10
+        )
 
 
 @pytest_asyncio.fixture(scope="module")
