@@ -296,6 +296,13 @@ async def multus_installed(ops_test, k8s_model):
         else:
             pytest.fail("timed out waiting for Multus config on unit %s" % unit.name)
 
+    yield
+
+    with ops_test.model_context(k8s_alias):
+        log.info("Removing multus application ...")
+        cmd = "remove-application multus --destroy-storage --force"
+        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
     for _, obj in client.watch(
