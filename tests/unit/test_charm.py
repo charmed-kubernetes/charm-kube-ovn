@@ -7,7 +7,7 @@ from subprocess import CalledProcessError
 import unittest.mock as mock
 from pathlib import Path
 from contextlib import ExitStack as does_not_raise
-
+import json
 import pytest
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
@@ -762,3 +762,25 @@ def test_on_update_status(
 def test_on_upgrade(mock_install, charm, harness):
     charm.on_upgrade_charm("mock_event")
     mock_install.assert_called_once_with("kubectl-ko")
+
+
+@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
+def test_grafana_dashboards(install_kubectl_plugin, harness):
+    # Test that the files in src/grafana_dashboards are being passed as relation data
+    harness.set_leader(True)
+    harness.begin_with_initial_hooks()
+    relation_id = harness.add_relation("grafana-dashboard", "grafana-k8s")
+    data = harness.get_relation_data(relation_id, "kube-ovn")
+    dashboards_json = data["dashboards"]
+    dashboards = json.loads(dashboards_json)
+    templates = dashboards["templates"]
+    grafana_dir = Path("src/grafana_dashboards")
+    grafana_files = [p.name for p in grafana_dir.iterdir() if p.is_file()]
+    expected_keys = []
+    for file_with_extension in grafana_files:
+        if file_with_extension.endswith(".json"):
+            name_only = file_with_extension[:-5]
+            key = "file:" + name_only
+            expected_keys.append(key)
+
+    assert set(expected_keys) == set(templates.keys())
