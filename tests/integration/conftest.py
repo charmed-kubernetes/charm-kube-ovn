@@ -302,6 +302,9 @@ async def multus_installed(ops_test, k8s_model):
         log.info("Removing multus application ...")
         cmd = "remove-application multus --destroy-storage --force"
         rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+        log.info(stdout)
+        log.info(stderr)
+        assert rc == 0
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
@@ -331,6 +334,9 @@ async def grafana_app(ops_test, k8s_model):
         log.info("Removing grafana-k8s application ...")
         cmd = "remove-application grafana-k8s --destroy-storage --force"
         rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+        log.info(stdout)
+        log.info(stderr)
+        assert rc == 0
 
 
 @pytest_asyncio.fixture(scope="module")
