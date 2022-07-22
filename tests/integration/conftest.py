@@ -298,13 +298,14 @@ async def multus_installed(ops_test, k8s_model):
 
     yield
 
-    with ops_test.model_context(k8s_alias):
+    with ops_test.model_context(k8s_alias) as m:
         log.info("Removing multus application ...")
         cmd = "remove-application multus --destroy-storage --force"
         rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
         log.info(stdout)
         log.info(stderr)
         assert rc == 0
+        await m.block_until(lambda: "multus" not in m.applications, timeout=60 * 5)
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
@@ -337,6 +338,7 @@ async def grafana_app(ops_test, k8s_model):
         log.info(stdout)
         log.info(stderr)
         assert rc == 0
+        await m.block_until(lambda: "grafana-k8s" not in m.applications, timeout=60 * 5)
 
 
 @pytest_asyncio.fixture(scope="module")
