@@ -122,7 +122,7 @@
       "tableColumn": "",
       "targets": [
         {
-          "expr": "sum(up{job=\"kube-ovn-controller\"})",
+          "expr": "sum(up{job=~\".+kube-ovn-controller\"})",
           "format": "time_series",
           "instant": true,
           "intervalFactor": 2,
@@ -213,7 +213,7 @@
       "tableColumn": "",
       "targets": [
         {
-          "expr": "sum(increase(klog_lines_total{level=\"ERROR\", job=\"kube-ovn-controller\", instance=~\"$instance\"}[10m]))",
+          "expr": "sum(increase(klog_lines_total{level=\"ERROR\", job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[10m]))",
           "format": "time_series",
           "instant": true,
           "interval": "",
@@ -289,7 +289,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(workqueue_adds_total{job=\"kube-ovn-controller\", instance=~\"$instance\"}[5m])) by (instance, name)",
+          "expr": "sum(rate(workqueue_adds_total{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[5m])) by (instance, name)",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -385,7 +385,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(delta(workqueue_retries_total{job=\"kube-ovn-controller\", instance=~\"$instance\"}[5m])) by (instance, name)",
+          "expr": "sum(delta(workqueue_retries_total{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[5m])) by (instance, name)",
           "format": "time_series",
           "instant": false,
           "intervalFactor": 2,
@@ -483,7 +483,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "workqueue_depth{job=\"kube-ovn-controller\", instance=~\"$instance\"}",
+          "expr": "workqueue_depth{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -678,7 +678,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(delta(ovs_client_request_latency_milliseconds_count{job=\"kube-ovn-controller\", instance=~\"$instance\"}[1m])) by (instance, db, code )",
+          "expr": "sum(delta(ovs_client_request_latency_milliseconds_count{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[1m])) by (instance, db, code )",
           "interval": "",
           "legendFormat": "{{instance}} {{db}} {{code}}",
           "refId": "A"
@@ -770,7 +770,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "(sum(delta(ovs_client_request_latency_milliseconds_sum{job=\"kube-ovn-controller\", instance=~\"$instance\"}[1m])) by (instance, db, code))/(sum(delta(ovs_client_request_latency_milliseconds_count{job=\"kube-ovn-controller\", instance=~\"$instance\"}[1m])) by (instance, db, code))",
+          "expr": "(sum(delta(ovs_client_request_latency_milliseconds_sum{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[1m])) by (instance, db, code))/(sum(delta(ovs_client_request_latency_milliseconds_count{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[1m])) by (instance, db, code))",
           "interval": "",
           "legendFormat": "{{instance}} {{db}} {{code}}",
           "refId": "A"
@@ -866,7 +866,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(rate(rest_client_requests_total{job=\"kube-ovn-controller\", instance=~\"$instance\",code=~\"2..\"}[5m]))",
+          "expr": "sum(rate(rest_client_requests_total{job=~\".+kube-ovn-controller\", instance=~\"$instance\",code=~\"2..\"}[5m]))",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -874,21 +874,21 @@
           "refId": "A"
         },
         {
-          "expr": "sum(rate(rest_client_requests_total{job=\"kube-ovn-controller\", instance=~\"$instance\",code=~\"3..\"}[5m]))",
+          "expr": "sum(rate(rest_client_requests_total{job=~\".+kube-ovn-controller\", instance=~\"$instance\",code=~\"3..\"}[5m]))",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "3xx",
           "refId": "B"
         },
         {
-          "expr": "sum(rate(rest_client_requests_total{job=\"kube-ovn-controller\", instance=~\"$instance\",code=~\"4..\"}[5m]))",
+          "expr": "sum(rate(rest_client_requests_total{job=~\".+kube-ovn-controller\", instance=~\"$instance\",code=~\"4..\"}[5m]))",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "4xx",
           "refId": "C"
         },
         {
-          "expr": "sum(rate(rest_client_requests_total{job=\"kube-ovn-controller\", instance=~\"$instance\",code=~\"5..\"}[5m]))",
+          "expr": "sum(rate(rest_client_requests_total{job=~\".+kube-ovn-controller\", instance=~\"$instance\",code=~\"5..\"}[5m]))",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "5xx",
@@ -986,7 +986,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "histogram_quantile(0.99, sum(rate(rest_client_request_latency_seconds_bucket{job=\"kube-ovn-controller\", instance=~\"$instance\"}[5m])) by (verb, url, le))",
+          "expr": "histogram_quantile(0.99, sum(rate(rest_client_request_latency_seconds_bucket{job=~\".+kube-ovn-controller\", instance=~\"$instance\"}[5m])) by (verb, url, le))",
           "format": "time_series",
           "instant": false,
           "interval": "",
@@ -1085,7 +1085,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "process_resident_memory_bytes{job=\"kube-ovn-controller\",instance=~\"$instance\"}",
+          "expr": "process_resident_memory_bytes{job=~\".+kube-ovn-controller\",instance=~\"$instance\"}",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1183,7 +1183,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "rate(process_cpu_seconds_total{job=\"kube-ovn-controller\",instance=~\"$instance\"}[5m])",
+          "expr": "rate(process_cpu_seconds_total{job=~\".+kube-ovn-controller\",instance=~\"$instance\"}[5m])",
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
@@ -1281,7 +1281,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "go_goroutines{job=\"kube-ovn-controller\",instance=~\"$instance\"}",
+          "expr": "go_goroutines{job=~\".+kube-ovn-controller\",instance=~\"$instance\"}",
           "format": "time_series",
           "intervalFactor": 2,
           "legendFormat": "{{instance}}",
@@ -1359,14 +1359,14 @@
         "allValue": null,
         "current": {},
         "datasource": "${prometheusds}",
-        "definition": "label_values(process_cpu_seconds_total{job=\"kube-ovn-controller\"}, instance)",
+        "definition": "label_values(process_cpu_seconds_total{job=~\".+kube-ovn-controller\"}, instance)",
         "hide": 0,
         "includeAll": true,
         "label": null,
         "multi": false,
         "name": "instance",
         "options": [],
-        "query": "label_values(process_cpu_seconds_total{job=\"kube-ovn-controller\"}, instance)",
+        "query": "label_values(process_cpu_seconds_total{job=~\".+kube-ovn-controller\"}, instance)",
         "refresh": 2,
         "regex": "",
         "skipUrlSync": false,

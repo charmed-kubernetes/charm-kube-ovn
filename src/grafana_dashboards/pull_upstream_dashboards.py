@@ -24,12 +24,16 @@ with open(response[0], "r") as f:
 # variables for panels. However, it will not replace datasource variables in templates.
 # We must make the appropriate replacement ourselves. The prometheus datasource variable expected by
 # the COS grafana charm is named prometheusds.
+# We must also replace the job name with a regex matching the prefixed job name coming from the prometheus scrape lib
+# This means replacing any occurrence of job=\" with job=~\".+
 ds = "${prometheusds}"
 grafana_files = [
     p for p in grafana_dir.iterdir() if (p.is_file() and p.name.endswith(".json"))
 ]
 for file in grafana_files:
-    json_data = json.loads(file.read_text())
+    json_string = file.read_text()
+    json_string = json_string.replace(r"job=\"", r"job=~\".+")
+    json_data = json.loads(json_string)
     templating = json_data["templating"]
     templates = templating["list"]
     for template in templates:

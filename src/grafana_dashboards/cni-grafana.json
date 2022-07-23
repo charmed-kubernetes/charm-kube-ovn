@@ -101,7 +101,7 @@
       "pluginVersion": "7.1.0",
       "targets": [
         {
-          "expr": "sum(up{job=\"kube-ovn-cni\"})",
+          "expr": "sum(up{job=~\".+kube-ovn-cni\"})",
           "instant": true,
           "interval": "",
           "legendFormat": "",
@@ -160,7 +160,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(increase(cni_op_latency_seconds_count{job=\"kube-ovn-cni\", instance=~\"$instance\"}[5m])) by (instance, method, status_code)",
+          "expr": "sum(increase(cni_op_latency_seconds_count{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[5m])) by (instance, method, status_code)",
           "instant": false,
           "interval": "",
           "intervalFactor": 2,
@@ -347,7 +347,7 @@
       "pluginVersion": "7.1.0",
       "targets": [
         {
-          "expr": "sum(increase(klog_lines_total{level=\"ERROR\", instance=~\"$instance\", job=\"kube-ovn-cni\"}[10m]))",
+          "expr": "sum(increase(klog_lines_total{level=\"ERROR\", instance=~\"$instance\", job=~\".+kube-ovn-cni\"}[10m]))",
           "instant": true,
           "interval": "",
           "legendFormat": "",
@@ -404,7 +404,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "sum(delta(ovs_client_request_latency_milliseconds_count{job=\"kube-ovn-cni\", instance=~\"$instance\"}[1m])) by (instance, code)",
+          "expr": "sum(delta(ovs_client_request_latency_milliseconds_count{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[1m])) by (instance, code)",
           "interval": "",
           "legendFormat": "{{instance}} {{code}}",
           "refId": "A"
@@ -496,7 +496,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "(sum(delta(ovs_client_request_latency_milliseconds_sum{job=\"kube-ovn-cni\", instance=~\"$instance\"}[1m])) by (instance, code))/(sum(delta(ovs_client_request_latency_milliseconds_count{job=\"kube-ovn-cni\", instance=~\"$instance\"}[1m])) by (instance, code))",
+          "expr": "(sum(delta(ovs_client_request_latency_milliseconds_sum{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[1m])) by (instance, code))/(sum(delta(ovs_client_request_latency_milliseconds_count{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[1m])) by (instance, code))",
           "interval": "",
           "legendFormat": "{{instance}} {{code}}",
           "refId": "A"
@@ -588,7 +588,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "process_resident_memory_bytes{job=\"kube-ovn-cni\", instance=~\"$instance\"}",
+          "expr": "process_resident_memory_bytes{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}",
           "instant": false,
           "interval": "",
           "legendFormat": "{{instance}}",
@@ -681,7 +681,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "go_goroutines{job=\"kube-ovn-cni\", instance=~\"$instance\"}",
+          "expr": "go_goroutines{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}",
           "interval": "",
           "legendFormat": "{{instance}}",
           "refId": "A"
@@ -773,7 +773,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "rate(process_cpu_seconds_total{job=\"kube-ovn-cni\", instance=~\"$instance\"}[5m])",
+          "expr": "rate(process_cpu_seconds_total{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[5m])",
           "instant": false,
           "interval": "",
           "legendFormat": "{{instance}}",
@@ -866,7 +866,7 @@
       "steppedLine": false,
       "targets": [
         {
-          "expr": "rate(rest_client_request_latency_seconds_sum{job=\"kube-ovn-cni\", instance=~\"$instance\"}[5m])/rate(rest_client_request_latency_seconds_count{job=\"kube-ovn-cni\", instance=~\"$instance\"}[5m])",
+          "expr": "rate(rest_client_request_latency_seconds_sum{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[5m])/rate(rest_client_request_latency_seconds_count{job=~\".+kube-ovn-cni\", instance=~\"$instance\"}[5m])",
           "interval": "",
           "legendFormat": "{{instance}} {{verb}}",
           "refId": "A"
@@ -942,14 +942,14 @@
         "allValue": null,
         "current": {},
         "datasource": "${prometheusds}",
-        "definition": "label_values(process_cpu_seconds_total{job=\"kube-ovn-cni\"}, instance)",
+        "definition": "label_values(process_cpu_seconds_total{job=~\".+kube-ovn-cni\"}, instance)",
         "hide": 0,
         "includeAll": true,
         "label": null,
         "multi": false,
         "name": "instance",
         "options": [],
-        "query": "label_values(process_cpu_seconds_total{job=\"kube-ovn-cni\"}, instance)",
+        "query": "label_values(process_cpu_seconds_total{job=~\".+kube-ovn-cni\"}, instance)",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
