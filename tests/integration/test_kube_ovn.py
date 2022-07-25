@@ -1,7 +1,7 @@
 from math import isclose
 from pathlib import Path
 from pytest_operator.plugin import OpsTest
-
+from grafana import Grafana
 import asyncio
 import shlex
 import pytest
@@ -244,6 +244,22 @@ async def test_gateway_qos(
         ops_test, gateway_server, gateway_client_pod, namespace, kubeconfig
     )
     assert isclose(egress_bw, 30, rel_tol=0.10)
+
+
+async def test_grafana(
+    ops_test, grafana_host, grafana_password, expected_dashboard_titles
+):
+    # port is defined in grafana_service.yaml
+    grafana = Grafana(ops_test, host=grafana_host, port=30123, pw=grafana_password)
+    while not await grafana.is_ready():
+        log.info("Waiting for Grafana to be ready ...")
+        await asyncio.sleep(5)
+    dashboards = await grafana.dashboards_all()
+    actual_dashboard_titles = []
+    for dashboard in dashboards:
+        actual_dashboard_titles.append(dashboard["title"])
+
+    assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
 
 
 async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):

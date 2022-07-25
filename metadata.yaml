@@ -9,6 +9,9 @@ requires:
   cni:
     interface: kubernetes-cni
     scope: container
+provides:
+  grafana-dashboard:
+    interface: grafana_dashboard
 peers:
   kube-ovn:
     interface: kube-ovn

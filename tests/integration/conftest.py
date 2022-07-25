@@ -1,11 +1,13 @@
 import time
-
-import pytest
-import logging
 import os
 import juju.utils
+from juju.tag import untag
 import asyncio
 import subprocess
+import json
+import pytest
+import pytest_asyncio
+import logging
 
 from pathlib import Path
 import yaml
@@ -294,6 +296,17 @@ async def multus_installed(ops_test, k8s_model):
         else:
             pytest.fail("timed out waiting for Multus config on unit %s" % unit.name)
 
+    yield
+
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Removing multus application ...")
+        cmd = "remove-application multus --destroy-storage --force"
+        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+        log.info(stdout)
+        log.info(stderr)
+        assert rc == 0
+        await m.block_until(lambda: "multus" not in m.applications, timeout=60 * 10)
+
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
     for _, obj in client.watch(
@@ -304,3 +317,125 @@ def wait_daemonset(client: Client, namespace, name, pods_ready):
         status = obj.status.to_dict()
         if status["numberReady"] == pods_ready:
             return
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_app(ops_test, k8s_model):
+    grafana_model_obj, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Deploying grafana-k8s ...")
+        await m.deploy(entity_url="grafana-k8s", trust=True, channel="edge")
+
+        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60)
+        await m.wait_for_idle(status="active")
+
+    yield "grafana-k8s"
+
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Removing grafana-k8s application ...")
+        cmd = "remove-application grafana-k8s --destroy-storage --force"
+        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+        log.info(stdout)
+        log.info(stderr)
+        assert rc == 0
+        await m.block_until(
+            lambda: "grafana-k8s" not in m.applications, timeout=60 * 10
+        )
+
+
+@pytest_asyncio.fixture(scope="module")
+async def related_grafana(ops_test, grafana_app, k8s_model):
+    grafana_model_obj, k8s_alias = k8s_model
+    app_name = grafana_app
+    machine_model_name = ops_test.model_name
+    model_owner = untag("user-", grafana_model_obj.info.owner_tag)
+    with ops_test.model_context(k8s_alias) as m:
+        offer, saas = None, None
+        log.info("Creating CMR offer for Grafana")
+        offer = await m.create_offer(f"{app_name}:grafana-dashboard")
+        grafana_model_name = ops_test.model_name
+
+    log.info("Consuming Grafana CMR offer")
+    log.info(
+        f"{machine_model_name} consuming Grafana CMR offer from {grafana_model_name}"
+    )
+    saas = await ops_test.model.consume(
+        f"{model_owner}/{grafana_model_name}.{app_name}"
+    )
+    log.info("Relating grafana and kube-ovn...")
+    await ops_test.model.add_relation("kube-ovn", f"{app_name}:grafana-dashboard")
+    with ops_test.model_context(k8s_alias) as gf_model:
+        await gf_model.wait_for_idle(status="active")
+    await ops_test.model.wait_for_idle(status="active")
+    yield
+    with ops_test.model_context(k8s_alias) as m:
+        keep = ops_test.keep_model
+    if not keep:
+        try:
+            if saas:
+                log.info("Removing Grafana CMR consumer")
+                await ops_test.model.remove_saas(app_name)
+            if offer:
+                log.info("Removing Grafana CMR offer and relations")
+                await grafana_model_obj.remove_offer(
+                    f"{grafana_model_name}.{app_name}", force=True
+                )
+        except Exception:
+            log.exception("Error performing cleanup")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
+    grafana_model_obj, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias):
+        action = (
+            await ops_test.model.applications[grafana_app]
+            .units[0]
+            .run_action("get-admin-password")
+        )
+        action = await action.wait()
+    return action.results["admin-password"]
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_service(ops_test, client, related_grafana, k8s_model, grafana_app):
+    _, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias):
+        grafana_model_name = ops_test.model_name
+
+    log.info("Creating Grafana service ...")
+    path = Path("tests/data/grafana_service.yaml")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj, namespace=grafana_model_name)
+
+    yield
+
+    log.info("Deleting Grafana service ...")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(type(obj), obj.metadata.name, namespace=grafana_model_name)
+
+
+@pytest_asyncio.fixture(scope="module")
+async def grafana_host(
+    ops_test, grafana_service, worker_node, related_grafana, k8s_model, grafana_app
+):
+    worker_ip = None
+    for address in worker_node.status.addresses:
+        if address.type == "ExternalIP":
+            worker_ip = address.address
+    return worker_ip
+
+
+@pytest_asyncio.fixture(scope="module")
+async def expected_dashboard_titles():
+    grafana_dir = Path("src/grafana_dashboards")
+    grafana_files = [
+        p for p in grafana_dir.iterdir() if p.is_file() and p.name.endswith(".json")
+    ]
+    titles = []
+    for path in grafana_files:
+        dashboard = json.loads(path.read_text())
+        titles.append(dashboard["title"])
+    return titles

@@ -18,6 +18,7 @@ from ops.model import (
     MaintenanceStatus,
     ModelError,
 )
+from charms.grafana_k8s.v0.grafana_dashboard import GrafanaDashboardProvider
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class KubeOvnCharm(CharmBase):
 
     def __init__(self, *args):
         super().__init__(*args)
+        self.grafana_dashboard_provider = GrafanaDashboardProvider(self)
         self.stored.set_default(kube_ovn_configured=False)
         self.stored.set_default(pod_restart_needed=False)
         self.framework.observe(
