@@ -5,6 +5,7 @@ import logging
 import os
 import traceback
 import yaml
+from jinja2 import Environment, FileSystemLoader
 
 from pathlib import Path
 from subprocess import CalledProcessError, check_output
@@ -18,6 +19,9 @@ from ops.model import (
     ModelError,
 )
 from charms.grafana_k8s.v0.grafana_dashboard import GrafanaDashboardProvider
+from charms.prometheus_k8s.v0.prometheus_remote_write import (
+    PrometheusRemoteWriteConsumer,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,8 +34,12 @@ class KubeOvnCharm(CharmBase):
     def __init__(self, *args):
         super().__init__(*args)
         self.grafana_dashboard_provider = GrafanaDashboardProvider(self)
+        self.remote_write_consumer = PrometheusRemoteWriteConsumer(self)
+        self.jinja2_environment = Environment(loader=FileSystemLoader("templates/"))
         self.stored.set_default(kube_ovn_configured=False)
         self.stored.set_default(pod_restart_needed=False)
+        self.stored.set_default(grafana_agent_configured=False)
+        self.stored.set_default(prometheus_patched=False)
         self.framework.observe(
             self.on.cni_relation_changed, self.on_cni_relation_changed
         )
@@ -43,6 +51,10 @@ class KubeOvnCharm(CharmBase):
         self.framework.observe(self.on.remove, self.on_remove)
         self.framework.observe(self.on.update_status, self.on_update_status)
         self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
+        self.framework.observe(
+            self.remote_write_consumer.on.endpoints_changed,
+            self.handle_endpoints_changed,
+        )
 
     def add_container_args(self, container, args, command=False):
         key = "command" if command else "args"
@@ -53,6 +65,31 @@ class KubeOvnCharm(CharmBase):
     def apply_crds(self):
         self.unit.status = MaintenanceStatus("Applying CRDs")
         self.kubectl("apply", "-f", "templates/crd.yaml")
+
+    def apply_grafana_agent(self, remote_url):
+        patch_res = [
+            {"kind": "deployment", "name": "kube-ovn-monitor", "port": '"10661"'},
+            {"kind": "daemonset", "name": "kube-ovn-pinger", "port": '"8080"'},
+            {"kind": "daemonset", "name": "kube-ovn-cni", "port": '"10665"'},
+        ]
+        if not self.stored.prometheus_patched:
+            self.patch_prometheus_resources(patch_res)
+            self.stored.prometheus_patched = True
+
+        agent_config = self.render_template(
+            "grafana_configmap.yaml.j2",
+            model_name=self.model,
+            model_uuid=self.model.uuid,
+            application=self.model.app.name,
+            remote_url=remote_url,
+        )
+        self.kubectl("apply", "-n", "kube-system", "-f", agent_config)
+
+        if self.stored.grafana_agent_configured:
+            self.kubectl("delete", "-f", "templates/grafana_agent.yaml")
+        self.kubectl("apply", "-f", "templates/grafana_agent.yaml")
+
+        self.stored.grafana_agent_configured = True
 
     def apply_kube_ovn(self, service_cidr, registry):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
@@ -242,6 +279,11 @@ class KubeOvnCharm(CharmBase):
         ]
         return node_ips
 
+    def handle_endpoints_changed(self, _):
+        if self.remote_write_consumer.endpoints and self.unit.is_leader():
+            # Get the last available endpoint reported in the relation data.
+            self.apply_grafana_agent(self.remote_write_consumer.endpoints[-1]["url"])
+
     def install_kubectl_plugin(self, plugin_name):
         registry = self.get_registry()
         if not registry:
@@ -325,6 +367,25 @@ class KubeOvnCharm(CharmBase):
     def on_upgrade_charm(self, _):
         self.install_kubectl_plugin("kubectl-ko")
 
+    def patch_prometheus_resources(self, resources):
+        for res in resources:
+            patch_file = self.render_template(
+                "patch-prometheus.yaml.j2", port=res["port"]
+            )
+            name = res["name"]
+            port = res["port"]
+            log.info(f"Rendered {name} patch w/ port: {port}, patching...")
+            self.kubectl(
+                "patch",
+                res["kind"],
+                "-n",
+                "kube-system",
+                res["name"],
+                "--patch-file",
+                patch_file,
+            )
+            log.info(f"Patched {name}...")
+
     def remove_kubectl_plugin(self, plugin_name):
         try:
             plugin_path = Path(PLUGINS_PATH) / plugin_name
@@ -338,6 +399,16 @@ class KubeOvnCharm(CharmBase):
         destination = "templates/rendered/" + name
         with open(destination, "w") as f:
             yaml.safe_dump_all(manifest, f)
+        return destination
+
+    def render_template(self, filename, **kwargs):
+
+        os.makedirs("templates/rendered", exist_ok=True)
+        destination = f"templates/rendered/{filename}_rendered.yaml"
+        template = self.jinja2_environment.get_template(filename)
+        content = template.render(**kwargs)
+        with open(destination, mode="w") as out:
+            out.write(content)
         return destination
 
     def replace_container_args(self, container, args):

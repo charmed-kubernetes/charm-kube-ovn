@@ -11,6 +11,7 @@ import json
 import pytest
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
+import ops.framework
 
 from charm import KubeOvnCharm
 
@@ -764,6 +765,46 @@ def test_on_update_status(
     set_active_status.assert_called_once_with()
 
 
+@pytest.mark.parametrize("agent_configured", [False, True])
+@mock.patch("charm.KubeOvnCharm.patch_prometheus_resources")
+@mock.patch("charm.KubeOvnCharm.render_template")
+def test_apply_grafana_agent(
+    mock_render, mock_patch, kubectl, harness: ops.testing.Harness, agent_configured
+):
+    patch_res = [
+        {"kind": "deployment", "name": "kube-ovn-monitor", "port": '"10661"'},
+        {"kind": "daemonset", "name": "kube-ovn-pinger", "port": '"8080"'},
+        {"kind": "daemonset", "name": "kube-ovn-cni", "port": '"10665"'},
+    ]
+    mock_render.return_value = "templates/test.yaml"
+    harness.disable_hooks()
+    harness.begin()
+    harness.set_leader(True)
+    harness.charm.stored = ops.framework.StoredState()
+    harness.charm.stored.prometheus_patched = (
+        harness.charm.stored.grafana_agent_configured
+    ) = agent_configured
+
+    harness.charm.apply_grafana_agent("prometheus.local/api/v1")
+
+    kubectl_calls = [
+        mock.call(
+            harness.charm, "apply", "-n", "kube-system", "-f", mock_render.return_value
+        ),
+    ]
+    if agent_configured:
+        mock_patch.assert_not_called()
+        kubectl_calls.append(
+            mock.call(harness.charm, "delete", "-f", "templates/grafana_agent.yaml")
+        )
+    else:
+        mock_patch.assert_called_once_with(patch_res)
+    kubectl_calls.append(
+        mock.call(harness.charm, "apply", "-f", "templates/grafana_agent.yaml")
+    )
+    kubectl.assert_has_calls(kubectl_calls)
+
+
 @mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
 def test_on_upgrade(mock_install, charm, harness):
     charm.on_upgrade_charm("mock_event")
@@ -790,3 +831,73 @@ def test_grafana_dashboards(install_kubectl_plugin, harness):
             expected_keys.append(key)
 
     assert set(expected_keys) == set(templates.keys())
+
+
+@pytest.mark.parametrize("leader", [True, False])
+@mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
+def test_handle_endpoints_changed(
+    apply_grafana_agent: mock.MagicMock, harness: ops.testing.Harness, leader
+):
+    harness.set_leader(leader)
+    rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
+    harness.add_relation_unit(rel_id, "prometheus/0")
+    remote_write_data = {"url": "prometheus.local:8080/api/v1"}
+    harness.update_relation_data(
+        rel_id,
+        "prometheus/0",
+        {"remote_write": json.dumps(remote_write_data)},
+    )
+
+    harness.begin_with_initial_hooks()
+
+    assert harness.charm.remote_write_consumer.endpoints == [remote_write_data]
+    if leader:
+        apply_grafana_agent.assert_has_calls(
+            [
+                mock.call("prometheus.local:8080/api/v1"),
+                mock.call("prometheus.local:8080/api/v1"),
+            ]
+        )
+    else:
+        apply_grafana_agent.assert_not_called()
+
+
+@mock.patch("charm.Environment.get_template")
+def test_render_template(mock_jinja_env: mock.MagicMock, charm):
+    mock_jinja_env.return_value.render.return_value = 'content: "rendered"'
+    destination = Path(charm.render_template("test_render.yaml.j2"))
+    assert destination.exists()
+    destination.unlink()
+    destination.parent.rmdir()
+
+
+@mock.patch("charm.KubeOvnCharm.render_template")
+def test_patch_prometheus_resources(mock_render: mock.MagicMock, charm, kubectl):
+    mock_render.return_value = (
+        "templates/rendered/patch-prometheus.yaml.j2_rendered.yaml"
+    )
+    test_resources = [
+        {"kind": "deployment", "name": "test-deployment1", "port": '"8080"'},
+        {"kind": "daemonset", "name": "test-daemon-set", "port": '"8081"'},
+    ]
+    charm.patch_prometheus_resources(test_resources)
+    mock_render_calls = [
+        mock.call("patch-prometheus.yaml.j2", port=res["port"])
+        for res in test_resources
+    ]
+    mock_render.assert_has_calls(mock_render_calls)
+
+    kubectl_calls = [
+        mock.call(
+            charm,
+            "patch",
+            res["kind"],
+            "-n",
+            "kube-system",
+            res["name"],
+            "--patch-file",
+            mock_render.return_value,
+        )
+        for res in test_resources
+    ]
+    kubectl.assert_has_calls(kubectl_calls)

@@ -2,6 +2,7 @@ from math import isclose
 from pathlib import Path
 from pytest_operator.plugin import OpsTest
 from grafana import Grafana
+from prometheus import Prometheus
 import asyncio
 import shlex
 import pytest
@@ -260,6 +261,16 @@ async def test_grafana(
         actual_dashboard_titles.append(dashboard["title"])
 
     assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
+
+
+async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
+    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+    while not await prometheus.is_ready():
+        log.info("Waiting for Prometheus to be ready...")
+        await asyncio.sleep(5)
+    metrics = await prometheus.metrics_all()
+
+    assert set(expected_prometheus_metrics) == set(metrics)
 
 
 async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):

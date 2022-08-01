@@ -439,3 +439,113 @@ async def expected_dashboard_titles():
         dashboard = json.loads(path.read_text())
         titles.append(dashboard["title"])
     return titles
+
+
+@pytest_asyncio.fixture(scope="module")
+async def prometheus_app(ops_test, k8s_model):
+    _, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Deploying prometheus-k8s ...")
+        await m.deploy(entity_url="prometheus-k8s", trust=True, channel="edge")
+
+        await m.block_until(lambda: "prometheus-k8s" in m.applications, timeout=60 * 3)
+        await m.wait_for_idle(status="active")
+
+    yield "prometheus-k8s"
+
+    with ops_test.model_context(k8s_alias) as m:
+        log.info("Removing prometheus-k8s application ...")
+        cmd = "remove-application prometheus-k8s --destroy-storage --force"
+        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+        log.info(stdout)
+        log.info(stderr)
+        assert rc == 0
+        await m.block_until(
+            lambda: "prometheus-k8s" not in m.applications, timeout=60 * 10
+        )
+
+
+@pytest_asyncio.fixture(scope="module")
+async def related_prometheus(ops_test, prometheus_app, k8s_model):
+    prometheus_model_obj, k8s_alias = k8s_model
+    app_name = prometheus_app
+    machine_model_name = ops_test.model_name
+    model_owner = untag("user-", prometheus_model_obj.info.owner_tag)
+    with ops_test.model_context(k8s_alias) as m:
+        offer, saas = None, None
+        log.info("Creating CMR offer for Prometheus")
+        offer = await m.create_offer(f"{app_name}:receive-remote-write")
+        prom_model_name = ops_test.model_name
+
+    log.info("Consuming Prometheus CMR offer")
+    log.info(
+        f"{machine_model_name} consuming Prometheus CMR offer from {prom_model_name}"
+    )
+    saas = await ops_test.model.consume(f"{model_owner}/{prom_model_name}.{app_name}")
+    log.info("Relating Prometheus and kube-ovn...")
+    await ops_test.model.add_relation("kube-ovn", f"{app_name}:receive-remote-write")
+    with ops_test.model_context(k8s_alias) as prom_model:
+        await prom_model.wait_for_idle(status="active")
+    await ops_test.model.wait_for_idle(status="active")
+    yield
+    with ops_test.model_context(k8s_alias) as m:
+        keep = ops_test.keep_model
+    if not keep:
+        try:
+            if saas:
+                log.info("Removing Prometheus CMR consumer")
+                await ops_test.model.remove_saas(app_name)
+            if offer:
+                log.info("Removing Prometheus CMR offer and relations")
+                await prometheus_model_obj.remove_offer(
+                    f"{prom_model_name}.{app_name}", force=True
+                )
+        except Exception:
+            log.exception("Error performing cleanup")
+
+
+@pytest_asyncio.fixture(scope="module")
+async def prometheus_service(
+    ops_test, client, related_prometheus, k8s_model, prometheus_app
+):
+    _, k8s_alias = k8s_model
+    with ops_test.model_context(k8s_alias):
+        prometheus_model_name = ops_test.model_name
+
+    log.info("Creating Prometheus service ...")
+    path = Path("tests/data/prometheus_service.yaml")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj, namespace=prometheus_model_name)
+
+    yield
+
+    log.info("Deleting Prometheus service ...")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(type(obj), obj.metadata.name, namespace=prometheus_model_name)
+
+
+@pytest_asyncio.fixture(scope="module")
+async def prometheus_host(
+    ops_test,
+    prometheus_service,
+    worker_node,
+    related_prometheus,
+    k8s_model,
+    prometheus_app,
+):
+    worker_ip = None
+    for address in worker_node.status.addresses:
+        if address.type == "ExternalIP":
+            worker_ip = address.address
+    return worker_ip
+
+
+@pytest_asyncio.fixture(scope="module")
+async def expected_prometheus_metrics():
+    metrics_path = Path("tests/data/prometheus_metrics.json")
+    with open(metrics_path, "r") as file:
+        metrics = json.load(file)["data"]
+
+    return metrics
