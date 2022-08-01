@@ -7,7 +7,6 @@ import asyncio
 import shlex
 import pytest
 import logging
-import re
 import subprocess
 import time
 import json
@@ -124,13 +123,13 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {pod_prior.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
+        f'-- sh -c "iperf3 -c {server_ip} -p 5101 -JZ"'
     )
     cmd.append(
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {pod_non_prior.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
+        f'-- sh -c "iperf3 -c {server_ip} -p 5102 -JZ"'
     )
 
     processes = []
@@ -144,8 +143,8 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
         out, _ = p.communicate()
         results.append(out.decode("utf-8"))
 
-    prior_bw = parse_iperf_result(results[0])
-    non_prior_bw = parse_iperf_result(results[1])
+    _, prior_bw = parse_iperf_result(results[0])
+    _, non_prior_bw = parse_iperf_result(results[1])
 
     assert prior_bw > non_prior_bw
 
@@ -325,10 +324,29 @@ async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
 
 
 def parse_iperf_result(output):
-    # First line contains test result
-    line = output.split("\n")[0]
-    # Sixth value contains the average bandwidth value
-    return float(re.sub(" +", " ", line).split(" ")[6])
+    # iperf3 output looks like this:
+    # {
+    #   start: {...},
+    #   intervals: {...},
+    #   end: {
+    #     sum_sent: {
+    #       streams: {...},
+    #       sum_sent: {
+    #         ...,
+    #         bits_per_second: xxx.xxx,
+    #         ...
+    #       },
+    #       sum_received: {...},
+    #     }
+    #   },
+    # }
+
+    result = json.loads(output)
+    # Extract the average values in bps and convert into mbps.
+    sum_sent = float(result["end"]["sum_sent"]["bits_per_second"]) / 1e6
+    sum_received = float(result["end"]["sum_received"]["bits_per_second"]) / 1e6
+
+    return (sum_sent, sum_received)
 
 
 async def run_bandwidth_test(
@@ -351,12 +369,13 @@ async def run_bandwidth_test(
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {client.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} {reverse_flag} -p 5101 | tail -3"'
+        f'-- sh -c "iperf3 -c {server_ip} {reverse_flag} -p 5101 -JZ"'
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
-    return parse_iperf_result(stdout)
+    _, sum_received = parse_iperf_result(stdout)
+    return sum_received
 
 
 async def run_external_bandwidth_test(
@@ -367,12 +386,13 @@ async def run_external_bandwidth_test(
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {client.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server} {reverse_flag} | tail -3"'
+        f'-- sh -c "iperf3 -c {server} {reverse_flag} -JZ"'
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
-    return parse_iperf_result(stdout)
+    _, sum_received = parse_iperf_result(stdout)
+    return sum_received
 
 
 async def ping(ops_test, pinger, pingee, namespace, kubeconfig):
