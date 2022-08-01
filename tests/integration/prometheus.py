@@ -37,7 +37,6 @@ class Prometheus:
         api_path = "-/ready"
         uri = "{}/{}".format(self.base_uri, api_path)
 
-
         cmd = f"run --unit ubuntu/0 -- curl {uri}"
         rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
         assert rc == 0, f"Failed to curl ready endpoint: {(stdout or stderr).strip()}"
