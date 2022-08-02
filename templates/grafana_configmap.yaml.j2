@@ -1,6 +1,8 @@
 kind: ConfigMap
 metadata:
   name: grafana-agent
+  labels:
+    juju.io/application: kube-ovn
 apiVersion: v1
 data:
   agent.yaml: |
@@ -15,7 +17,9 @@ data:
       configs:
       - name: integrations
         remote_write:
-        - url: {{ remote_url }}
+        {%- for item in remote_endpoints %}
+        - url: {{ item.url }}
+        {%- endfor %}
         scrape_configs:
         - job_name: juju-kube-ovn-controller
           kubernetes_sd_configs:

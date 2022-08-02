@@ -772,9 +772,9 @@ def test_apply_grafana_agent(
     mock_render, mock_patch, kubectl, harness: ops.testing.Harness, agent_configured
 ):
     patch_res = [
-        {"kind": "deployment", "name": "kube-ovn-monitor", "port": '"10661"'},
-        {"kind": "daemonset", "name": "kube-ovn-pinger", "port": '"8080"'},
-        {"kind": "daemonset", "name": "kube-ovn-cni", "port": '"10665"'},
+        {"kind": "deployment", "name": "kube-ovn-monitor", "port": 10661},
+        {"kind": "daemonset", "name": "kube-ovn-pinger", "port": 8080},
+        {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
     ]
     mock_render.return_value = "templates/test.yaml"
     harness.disable_hooks()
@@ -835,7 +835,7 @@ def test_grafana_dashboards(install_kubectl_plugin, harness):
 
 @pytest.mark.parametrize("leader", [True, False])
 @mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
-def test_handle_endpoints_changed(
+def test_remote_write_consumer_changed(
     apply_grafana_agent: mock.MagicMock, harness: ops.testing.Harness, leader
 ):
     harness.set_leader(leader)
@@ -854,18 +854,16 @@ def test_handle_endpoints_changed(
     if leader:
         apply_grafana_agent.assert_has_calls(
             [
-                mock.call("prometheus.local:8080/api/v1"),
-                mock.call("prometheus.local:8080/api/v1"),
+                mock.call([remote_write_data]),
+                mock.call([remote_write_data]),
             ]
         )
     else:
         apply_grafana_agent.assert_not_called()
 
 
-@mock.patch("charm.Environment.get_template")
-def test_render_template(mock_jinja_env: mock.MagicMock, charm):
-    mock_jinja_env.return_value.render.return_value = 'content: "rendered"'
-    destination = Path(charm.render_template("test_render.yaml.j2"))
+def test_render_template(charm):
+    destination = Path(charm.render_template("patch-prometheus.yaml.j2"))
     assert destination.exists()
     destination.unlink()
     destination.parent.rmdir()
@@ -877,8 +875,8 @@ def test_patch_prometheus_resources(mock_render: mock.MagicMock, charm, kubectl)
         "templates/rendered/patch-prometheus.yaml.j2_rendered.yaml"
     )
     test_resources = [
-        {"kind": "deployment", "name": "test-deployment1", "port": '"8080"'},
-        {"kind": "daemonset", "name": "test-daemon-set", "port": '"8081"'},
+        {"kind": "deployment", "name": "test-deployment1", "port": 8080},
+        {"kind": "daemonset", "name": "test-daemon-set", "port": 8081},
     ]
     charm.patch_prometheus_resources(test_resources)
     mock_render_calls = [
