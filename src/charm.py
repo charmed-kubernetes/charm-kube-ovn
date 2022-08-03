@@ -56,6 +56,11 @@ class KubeOvnCharm(CharmBase):
             self.remote_write_consumer.on.endpoints_changed,
             self.remote_write_consumer_changed,
         )
+        self.framework.observe(
+            self.on.send_remote_write_relation_departed,
+            self.on_send_remote_write_departed,
+        )
+        self.framework.observe(self.on.leader_elected, self.on_leader_elected)
 
     def add_container_args(self, container, args, command=False):
         key = "command" if command else "args"
@@ -68,27 +73,32 @@ class KubeOvnCharm(CharmBase):
         self.kubectl("apply", "-f", "templates/crd.yaml")
 
     def apply_grafana_agent(self, remote_endpoints):
-        patch_res = [
-            {"kind": "deployment", "name": "kube-ovn-monitor", "port": 10661},
-            {"kind": "daemonset", "name": "kube-ovn-pinger", "port": 8080},
-            {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
-        ]
         if not self.stored.prometheus_patched:
-            self.patch_prometheus_resources(patch_res)
+            patch_res = [
+                {"kind": "deployment", "name": "kube-ovn-monitor", "port": 10661},
+                {"kind": "daemonset", "name": "kube-ovn-pinger", "port": 8080},
+                {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
+            ]
+            self.patch_prometheus_resources(patch_res, "kube-system")
             self.stored.prometheus_patched = True
 
         agent_config = self.render_template(
-            "grafana_configmap.yaml.j2",
-            model_name=self.model,
-            model_uuid=self.model.uuid,
-            application=self.model.app.name,
+            "grafana-configmap.yaml",
+            juju_model=self.model.name,
+            juju_model_uuid=self.model.uuid,
+            juju_app=self.model.app.name,
             remote_endpoints=remote_endpoints,
         )
-        self.kubectl("apply", "-n", "kube-system", "-f", agent_config)
-
+        grafana_manifest = self.render_template(
+            "grafana-agent.yaml", juju_app=self.model.app.name
+        )
         if self.stored.grafana_agent_configured:
-            self.kubectl("delete", "-f", "templates/grafana_agent.yaml")
-        self.kubectl("apply", "-f", "templates/grafana_agent.yaml")
+            self.kubectl("delete", "-f", grafana_manifest)
+        else:
+            self.kubectl("create", "namespace", "grafana-agent")
+
+        self.kubectl("apply", "-f", agent_config)
+        self.kubectl("apply", "-f", grafana_manifest)
 
         self.stored.grafana_agent_configured = True
 
@@ -352,8 +362,24 @@ class KubeOvnCharm(CharmBase):
         self.install_kubectl_plugin("kubectl-ko")
         self.set_active_status()
 
+    def on_leader_elected(self, _):
+        if self.unit.is_leader():
+            try:
+                self.kubectl("get", "namespace", "grafana-agent")
+                self.stored.grafana_agent_configured = (
+                    self.stored.prometheus_patched
+                ) = True
+            except CalledProcessError:
+                self.stored.grafana_agent_configured = (
+                    self.stored.prometheus_patched
+                ) = False
+
     def on_remove(self, _):
         self.remove_kubectl_plugin("kubectl-ko")
+
+    def on_send_remote_write_departed(self, event):
+        if self.stored.grafana_agent_configured and self.unit.is_leader():
+            self.remove_grafana_agent()
 
     def on_update_status(self, _):
         if not self.stored.kube_ovn_configured:
@@ -363,29 +389,45 @@ class KubeOvnCharm(CharmBase):
     def on_upgrade_charm(self, _):
         self.install_kubectl_plugin("kubectl-ko")
 
-    def patch_prometheus_resources(self, resources):
-        for res in resources:
+    def patch_prometheus_resources(self, resources, namespace, remove=False):
+        if remove:
             patch_file = self.render_template(
-                "patch-prometheus.yaml.j2", port=res["port"]
+                "patch-prometheus.yaml", scrape="null", port="null", remove=remove
             )
-            name = res["name"]
-            port = res["port"]
-            log.info(f"Rendered {name} patch w/ port: {port}, patching...")
+        for res in resources:
+            if not remove:
+                patch_file = self.render_template(
+                    "patch-prometheus.yaml",
+                    scrape="true",
+                    port=res["port"],
+                    remove=remove,
+                )
             self.kubectl(
                 "patch",
                 res["kind"],
                 "-n",
-                "kube-system",
+                namespace,
                 res["name"],
                 "--patch-file",
                 patch_file,
             )
-            log.info(f"Patched {name}...")
 
     def remote_write_consumer_changed(self, _):
         if self.remote_write_consumer.endpoints and self.unit.is_leader():
             # Get the last available endpoint reported in the relation data.
             self.apply_grafana_agent(self.remote_write_consumer.endpoints)
+
+    def remove_grafana_agent(self):
+        patched_resources = [
+            {"kind": "deployment", "name": "kube-ovn-monitor"},
+            {"kind": "daemonset", "name": "kube-ovn-pinger"},
+            {"kind": "daemonset", "name": "kube-ovn-cni"},
+        ]
+        self.patch_prometheus_resources(patched_resources, "kube-system", remove=True)
+        self.stored.prometheus_patched = False
+
+        self.kubectl("delete", "namespace", "grafana-agent")
+        self.stored.grafana_agent_configured = False
 
     def remove_kubectl_plugin(self, plugin_name):
         try:

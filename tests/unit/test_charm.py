@@ -769,7 +769,7 @@ def test_on_update_status(
 @mock.patch("charm.KubeOvnCharm.patch_prometheus_resources")
 @mock.patch("charm.KubeOvnCharm.render_template")
 def test_apply_grafana_agent(
-    mock_render, mock_patch, kubectl, harness: ops.testing.Harness, agent_configured
+    mock_render, mock_patch, kubectl, harness, agent_configured
 ):
     patch_res = [
         {"kind": "deployment", "name": "kube-ovn-monitor", "port": 10661},
@@ -787,20 +787,22 @@ def test_apply_grafana_agent(
 
     harness.charm.apply_grafana_agent("prometheus.local/api/v1")
 
-    kubectl_calls = [
-        mock.call(
-            harness.charm, "apply", "-n", "kube-system", "-f", mock_render.return_value
-        ),
-    ]
+    kubectl_calls = []
     if agent_configured:
         mock_patch.assert_not_called()
         kubectl_calls.append(
-            mock.call(harness.charm, "delete", "-f", "templates/grafana_agent.yaml")
+            mock.call(harness.charm, "delete", "-f", mock_render.return_value)
         )
     else:
-        mock_patch.assert_called_once_with(patch_res)
+        mock_patch.assert_called_once_with(patch_res, "kube-system")
+        kubectl_calls.append(
+            mock.call(harness.charm, "create", "namespace", "grafana-agent")
+        )
     kubectl_calls.append(
-        mock.call(harness.charm, "apply", "-f", "templates/grafana_agent.yaml")
+        mock.call(harness.charm, "apply", "-f", mock_render.return_value)
+    )
+    kubectl_calls.append(
+        mock.call(harness.charm, "apply", "-f", mock_render.return_value),
     )
     kubectl.assert_has_calls(kubectl_calls)
 
@@ -811,8 +813,8 @@ def test_on_upgrade(mock_install, charm, harness):
     mock_install.assert_called_once_with("kubectl-ko")
 
 
-@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
-def test_grafana_dashboards(install_kubectl_plugin, harness):
+@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin", mock.MagicMock())
+def test_grafana_dashboards(harness):
     # Test that the files in src/grafana_dashboards are being passed as relation data
     harness.set_leader(True)
     harness.begin_with_initial_hooks()
@@ -835,9 +837,7 @@ def test_grafana_dashboards(install_kubectl_plugin, harness):
 
 @pytest.mark.parametrize("leader", [True, False])
 @mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
-def test_remote_write_consumer_changed(
-    apply_grafana_agent: mock.MagicMock, harness: ops.testing.Harness, leader
-):
+def test_remote_write_consumer_changed(apply_grafana_agent, harness, leader):
     harness.set_leader(leader)
     rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
     harness.add_relation_unit(rel_id, "prometheus/0")
@@ -862,27 +862,90 @@ def test_remote_write_consumer_changed(
         apply_grafana_agent.assert_not_called()
 
 
+@pytest.mark.parametrize("leader", [True, False])
+@mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
+def test_on_send_remote_write_departed(remove_grafana_agent, harness, leader):
+    harness.set_leader(leader)
+    harness.begin_with_initial_hooks()
+    harness.charm.stored = ops.framework.StoredState()
+    harness.charm.stored.grafana_agent_configured = leader
+    harness.charm.on_send_remote_write_departed("mock_event")
+
+    if leader:
+        remove_grafana_agent.called_once()
+    else:
+        remove_grafana_agent.assert_not_called()
+
+
+@mock.patch("charm.KubeOvnCharm.patch_prometheus_resources")
+def test_remove_grafana_agent(mock_patch, charm, kubectl):
+    patched_resources = [
+        {"kind": "deployment", "name": "kube-ovn-monitor"},
+        {"kind": "daemonset", "name": "kube-ovn-pinger"},
+        {"kind": "daemonset", "name": "kube-ovn-cni"},
+    ]
+    charm.remove_grafana_agent()
+    assert mock_patch.called_once_with(
+        mock.call(patched_resources, "kube-system", remove=True)
+    )
+    kubectl.assert_called_once_with(charm, "delete", "namespace", "grafana-agent")
+
+
 def test_render_template(charm):
-    destination = Path(charm.render_template("patch-prometheus.yaml.j2"))
+    destination = Path(charm.render_template("patch-prometheus.yaml"))
     assert destination.exists()
     destination.unlink()
     destination.parent.rmdir()
 
 
+@pytest.mark.parametrize(
+    "side_effect,exception",
+    [
+        pytest.param(
+            None,
+            does_not_raise(),
+            id="Namespace found",
+        ),
+        pytest.param(
+            CalledProcessError(
+                "1",
+                "kubectl"
+                "Error from server (NotFound): namespaces grafana-agent not found",
+            ),
+            pytest.raises(CalledProcessError),
+            id="Namespace not found",
+        ),
+    ],
+)
+def test_on_leader_elected(harness, kubectl, side_effect, exception):
+    harness.set_leader(True)
+    harness.begin()
+    kubectl.side_effect = side_effect
+    harness.charm.on_leader_elected("mock_event")
+    if side_effect:
+        assert harness.charm.stored.grafana_agent_configured is False
+
+
+@pytest.mark.parametrize("remove", [True, False])
 @mock.patch("charm.KubeOvnCharm.render_template")
-def test_patch_prometheus_resources(mock_render: mock.MagicMock, charm, kubectl):
-    mock_render.return_value = (
-        "templates/rendered/patch-prometheus.yaml.j2_rendered.yaml"
-    )
+def test_patch_prometheus_resources(mock_render, charm, kubectl, remove):
+    mock_render.return_value = "templates/rendered/patch-prometheus_rendered.yaml"
     test_resources = [
         {"kind": "deployment", "name": "test-deployment1", "port": 8080},
         {"kind": "daemonset", "name": "test-daemon-set", "port": 8081},
     ]
-    charm.patch_prometheus_resources(test_resources)
-    mock_render_calls = [
-        mock.call("patch-prometheus.yaml.j2", port=res["port"])
-        for res in test_resources
-    ]
+    charm.patch_prometheus_resources(test_resources, "kube-system", remove=remove)
+    if remove:
+        mock_render_calls = [
+            mock.call("patch-prometheus.yaml", scrape="null", port="null", remove=True)
+        ]
+    else:
+        mock_render_calls = [
+            mock.call(
+                "patch-prometheus.yaml", scrape="true", port=res["port"], remove=False
+            )
+            for res in test_resources
+        ]
     mock_render.assert_has_calls(mock_render_calls)
 
     kubectl_calls = [

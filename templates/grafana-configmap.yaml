@@ -1,8 +1,9 @@
 kind: ConfigMap
 metadata:
   name: grafana-agent
+  namespace: grafana-agent
   labels:
-    juju.io/application: kube-ovn
+    juju.io/application: {{ juju_app }}
 apiVersion: v1
 data:
   agent.yaml: |
@@ -11,9 +12,9 @@ data:
       global:
         scrape_interval: 10s
         external_labels:
-          juju_model_name: {{ model }}
-          juju_model_uuid: {{ model_uuid }}
-          juju_application: {{ application }}
+          juju_model_name: {{ juju_model }}
+          juju_model_uuid: {{ juju_model_uuid }}
+          juju_application: {{ juju_app }}
       configs:
       - name: integrations
         remote_write:

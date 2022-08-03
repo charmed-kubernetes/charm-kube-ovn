@@ -2,16 +2,16 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: grafana-agent
-  namespace: kube-system
+  namespace: grafana-agent
   labels:
-    juju.io/application: kube-ovn
+    juju.io/application: {{ juju_app }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: grafana-agent
   labels:
-    juju.io/application: kube-ovn
+    juju.io/application: {{ juju_app }}
 rules:
 - apiGroups:
   - ""
@@ -36,7 +36,7 @@ kind: ClusterRoleBinding
 metadata:
   name: grafana-agent
   labels:
-    juju.io/application: kube-ovn
+    juju.io/application: {{ juju_app }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -44,16 +44,16 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: grafana-agent
-  namespace: kube-system
+  namespace: grafana-agent
 ---
 apiVersion: v1
 kind: Service
 metadata:
   labels:
     name: grafana-agent
-    juju.io/application: kube-ovn
+    juju.io/application: {{ juju_app }}
   name: grafana-agent
-  namespace: kube-system
+  namespace: grafana-agent
 spec:
   clusterIP: None
   ports:
@@ -66,8 +66,10 @@ spec:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
+  labels:
+    juju.io/application: {{ juju_app }}
   name: grafana-agent
-  namespace: kube-system
+  namespace: grafana-agent
 spec:
   replicas: 1
   selector:
@@ -78,7 +80,7 @@ spec:
     metadata:
       labels:
         name: grafana-agent
-        juju.io/application: kube-ovn
+        juju.io/application: {{ juju_app }}
     spec:
       containers:
       - args:
