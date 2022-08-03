@@ -264,7 +264,6 @@ def test_get_registry(harness, charm):
 def test_load_manifest(charm):
     with pytest.raises(FileNotFoundError):
         charm.load_manifest("bogus.yaml")
-    assert charm.load_manifest("crd.yaml")
     assert charm.load_manifest("kube-ovn.yaml")
     assert charm.load_manifest("ovn.yaml")
 
