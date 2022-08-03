@@ -1,14 +1,14 @@
 # DO NOT EDIT - For maintainability, we should keep this as close to the
 # upstream manifest as possible.
 #
-# https://raw.githubusercontent.com/kubeovn/kube-ovn/release-1.9/yamls/kube-ovn.yaml
+# https://raw.githubusercontent.com/kubeovn/kube-ovn/v1.10.4/yamls/kube-ovn.yaml
 
 ---
 kind: Deployment
 apiVersion: apps/v1
 metadata:
   name: kube-ovn-controller
-  namespace:  kube-system
+  namespace: kube-system
   annotations:
     kubernetes.io/description: |
       kube-ovn controller
@@ -46,11 +46,10 @@ spec:
       hostNetwork: true
       containers:
         - name: kube-ovn-controller
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
-          command:
-            - /kube-ovn/start-controller.sh
           args:
+            - /kube-ovn/start-controller.sh
             - --default-cidr=10.16.0.0/16
             - --default-gateway=10.16.0.1
             - --default-gateway-check=true
@@ -64,6 +63,7 @@ spec:
             - --pod-nic-type=veth-pair
             - --enable-lb=true
             - --enable-np=true
+            - --enable-eip-snat=true
             - --enable-external-vpc=true
           env:
             - name: ENABLE_SSL
@@ -122,7 +122,7 @@ kind: DaemonSet
 apiVersion: apps/v1
 metadata:
   name: kube-ovn-cni
-  namespace:  kube-system
+  namespace: kube-system
   annotations:
     kubernetes.io/description: |
       This daemon set launches the kube-ovn cni daemon.
@@ -150,7 +150,7 @@ spec:
       hostPID: true
       initContainers:
         - name: install-cni
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command: ["/kube-ovn/install-cni.sh"]
           securityContext:
@@ -161,7 +161,7 @@ spec:
               name: cni-bin
       containers:
         - name: cni-server
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command:
             - bash
@@ -188,6 +188,9 @@ spec:
                 fieldRef:
                   fieldPath: spec.nodeName
           volumeMounts:
+            - name: host-modules
+              mountPath: /lib/modules
+              readOnly: true
             - mountPath: /etc/openvswitch
               name: systemid
             - mountPath: /etc/cni/net.d
@@ -199,30 +202,30 @@ spec:
             - mountPath: /var/run/netns
               name: host-ns
               mountPropagation: HostToContainer
+            - mountPath: /var/log/kube-ovn
+              name: kube-ovn-log
+            - mountPath: /var/log/openvswitch
+              name: host-log-ovs
+            - mountPath: /var/log/ovn
+              name: host-log-ovn
             - mountPath: /etc/localtime
               name: localtime
-          readinessProbe:
-            exec:
-              command:
-                - nc
-                - -z
-                - -w3
-                - 127.0.0.1
-                - "10665"
-            periodSeconds: 3
-            timeoutSeconds: 5
           livenessProbe:
-            exec:
-              command:
-                - nc
-                - -z
-                - -w3
-                - 127.0.0.1
-                - "10665"
+            failureThreshold: 3
             initialDelaySeconds: 30
             periodSeconds: 7
-            timeoutSeconds: 5
-            failureThreshold: 5
+            successThreshold: 1
+            tcpSocket:
+              port: 10665
+            timeoutSeconds: 3
+          readinessProbe:
+            failureThreshold: 3
+            initialDelaySeconds: 30
+            periodSeconds: 7
+            successThreshold: 1
+            tcpSocket:
+              port: 10665
+            timeoutSeconds: 3
           resources:
             requests:
               cpu: 200m
@@ -233,6 +236,9 @@ spec:
       nodeSelector:
         kubernetes.io/os: "linux"
       volumes:
+        - name: host-modules
+          hostPath:
+            path: /lib/modules
         - name: systemid
           hostPath:
             path: /etc/origin/openvswitch
@@ -251,6 +257,15 @@ spec:
         - name: host-ns
           hostPath:
             path: /var/run/netns
+        - name: host-log-ovs
+          hostPath:
+            path: /var/log/openvswitch
+        - name: kube-ovn-log
+          hostPath:
+            path: /var/log/kube-ovn
+        - name: host-log-ovn
+          hostPath:
+            path: /var/log/ovn
         - name: localtime
           hostPath:
             path: /etc/localtime
@@ -260,7 +275,7 @@ kind: DaemonSet
 apiVersion: apps/v1
 metadata:
   name: kube-ovn-pinger
-  namespace:  kube-system
+  namespace: kube-system
   annotations:
     kubernetes.io/description: |
       This daemon set launches the openvswitch daemon.
@@ -281,7 +296,7 @@ spec:
       hostPID: true
       containers:
         - name: pinger
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           command:
             - /kube-ovn/kube-ovn-pinger
             - --external-address=114.114.114.114
@@ -413,7 +428,7 @@ spec:
       hostNetwork: true
       containers:
         - name: kube-ovn-monitor
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command: ["/kube-ovn/start-ovn-monitor.sh"]
           securityContext:
@@ -453,15 +468,15 @@ spec:
           readinessProbe:
             exec:
               command:
-              - cat
-              - /var/run/ovn/ovnnb_db.pid
+                - cat
+                - /var/run/ovn/ovn-controller.pid
             periodSeconds: 10
             timeoutSeconds: 45
           livenessProbe:
             exec:
               command:
-              - cat
-              - /var/run/ovn/ovnnb_db.pid
+                - cat
+                - /var/run/ovn/ovn-controller.pid
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 5
@@ -516,7 +531,7 @@ kind: Service
 apiVersion: v1
 metadata:
   name: kube-ovn-pinger
-  namespace:  kube-system
+  namespace: kube-system
   labels:
     app: kube-ovn-pinger
 spec:
@@ -530,7 +545,7 @@ kind: Service
 apiVersion: v1
 metadata:
   name: kube-ovn-controller
-  namespace:  kube-system
+  namespace: kube-system
   labels:
     app: kube-ovn-controller
 spec:
@@ -544,7 +559,7 @@ kind: Service
 apiVersion: v1
 metadata:
   name: kube-ovn-cni
-  namespace:  kube-system
+  namespace: kube-system
   labels:
     app: kube-ovn-cni
 spec:

@@ -2,8 +2,11 @@
 set -euo pipefail
 
 KUBE_OVN_NS=kube-system
+WITHOUT_KUBE_PROXY=false
 OVN_NB_POD=
 OVN_SB_POD=
+KUBE_OVN_VERSION=
+REGISTRY="kubeovn"
 
 showHelp(){
   echo "kubectl ko {subcommand} [option...]"
@@ -18,6 +21,8 @@ showHelp(){
   echo "  tcpdump {namespace/podname} [tcpdump options ...]     capture pod traffic"
   echo "  trace {namespace/podname} {target ip address} {icmp|tcp|udp} [target tcp or udp port]    trace ovn microflow of specific packet"
   echo "  diagnose {all|node} [nodename]    diagnose connectivity of all nodes or a specific node"
+  echo "  tuning {install-fastpath|local-install-fastpath|remove-fastpath|install-stt|local-install-stt|remove-stt} {centos7|centos8}} [kernel-devel-version]  deploy  kernel optimisation components to the system"
+  echo "  reload restart all kube-ovn components"
 }
 
 tcpdump(){
@@ -85,21 +90,29 @@ trace(){
     proto="6"
   fi
 
-  podIPs=($(kubectl get pod "$podName" -n "$namespace" -o jsonpath="{.status.podIPs[*].ip}"))
-  mac=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/mac_address})
-  ls=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/logical_switch})
   hostNetwork=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.spec.hostNetwork})
-  nodeName=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.spec.nodeName})
-
   if [ "$hostNetwork" = "true" ]; then
     echo "Can not trace host network pod"
     exit 1
   fi
 
+  ls=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/logical_switch})
   if [ -z "$ls" ]; then
     echo "pod address not ready"
     exit 1
   fi
+
+  podIPs=($(kubectl get pod "$podName" -n "$namespace" -o jsonpath="{.status.podIPs[*].ip}"))
+  if [ ${#podIPs[@]} -eq 0 ]; then
+    podIPs=($(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/ip_address} | sed 's/,/ /g'))
+    if [ ${#podIPs[@]} -eq 0 ]; then
+      echo "pod address not ready"
+      exit 1
+    fi
+  fi
+
+  mac=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/mac_address})
+  nodeName=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.spec.nodeName})
 
   podIP=""
   for ip in ${podIPs[@]}; do
@@ -120,7 +133,9 @@ trace(){
   fi
 
   gwMac=""
-  if [ ! -z "$(kubectl get subnet $ls -o jsonpath={.spec.vlan})" ]; then
+  vlan=$(kubectl get subnet "$ls" -o jsonpath={.spec.vlan})
+  logicalGateway=$(kubectl get subnet "$ls" -o jsonpath={.spec.logicalGateway})
+  if [ ! -z "$vlan" -a "$logicalGateway" != "true" ]; then
     gateway=$(kubectl get subnet "$ls" -o jsonpath={.spec.gateway})
     if [[ "$gateway" =~ .*,.* ]]; then
       if [ "$af" = "4" ]; then
@@ -256,7 +271,11 @@ diagnose(){
   kubectl get crd ips.kubeovn.io
   kubectl get crd vlans.kubeovn.io
   kubectl get crd provider-networks.kubeovn.io
-  kubectl get svc kube-dns -n kube-system
+  set +eu
+  if ! kubectl get svc kube-dns -n kube-system ; then
+     echo "Warning: kube-dns doesn't exist, maybe there is coredns service."
+  fi
+  set -eu
   kubectl get svc kubernetes -n default
   kubectl get sa -n kube-system ovn
   kubectl get clusterrole system:ovn
@@ -264,12 +283,17 @@ diagnose(){
 
   kubectl get no -o wide
   kubectl ko nbctl show
+  kubectl ko nbctl lr-policy-list ovn-cluster
   kubectl ko nbctl lr-route-list ovn-cluster
   kubectl ko nbctl ls-lb-list ovn-default
+  kubectl ko nbctl list address_set
   kubectl ko nbctl list acl
   kubectl ko sbctl show
 
-  checkKubeProxy
+  if [ "${WITHOUT_KUBE_PROXY}" = "false" ]; then
+    checkKubeProxy
+  fi
+
   checkDeployment ovn-central
   checkDeployment kube-ovn-controller
   checkDaemonSet kube-ovn-cni
@@ -347,6 +371,24 @@ getOvnCentralPod(){
       exit 1
     fi
     OVN_SB_POD=$SB_POD
+    VERSION=$(kubectl  -n kube-system get pods -l ovn-sb-leader=true -o yaml | grep  "image: $REGISTRY/kube-ovn:" | head -n 1 | awk -F ':' '{print $3}')
+    if [ -z "$VERSION" ]; then
+          echo "kubeovn version not exists"
+          exit 1
+    fi
+    KUBE_OVN_VERSION=$VERSION
+}
+
+getOvnCentralDbStatus(){
+  NB_PODS=$(kubectl get pod -n $KUBE_OVN_NS | grep ovn-central | awk '{print $1}')
+  for pod in $NB_PODS
+  do
+    echo "get dbstatus in pod $pod"
+    nbstatus=`kubectl exec "$pod" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnnb_db.ctl ovsdb-server/get-db-storage-status OVN_Northbound`
+    echo "nb db status $nbstatus"
+    sbstatus=`kubectl exec "$pod" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnsb_db.ctl ovsdb-server/get-db-storage-status OVN_Southbound`
+    echo "sb db status $sbstatus"
+  done
 }
 
 checkDaemonSet(){
@@ -365,21 +407,29 @@ checkDaemonSet(){
 
 checkDeployment(){
   name="$1"
-  ready=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.readyReplicas})
-  updated=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.updatedReplicas})
-  desire=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.replicas})
-  available=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.availableReplicas})
-  if [ "$ready" = "$updated" ] && [ "$updated" = "$desire" ] && [ "$desire" = "$available" ]; then
-    echo "deployment $name ready"
-  else
+  isfailed=true
+  for i in {0..29}
+  do
+    ready=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.readyReplicas})
+    updated=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.updatedReplicas})
+    desire=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.replicas})
+    available=$(kubectl get deployment -n $KUBE_OVN_NS "$name" -o jsonpath={.status.availableReplicas})
+    if [ "$ready" = "$updated" ] && [ "$updated" = "$desire" ] && [ "$desire" = "$available" ]; then
+      echo "deployment $name ready"
+      isfailed=false
+      break
+    fi
+    sleep 1
+  done
+  if $isfailed; then
     echo "Error deployment $name not ready"
-    exit 1
   fi
 }
 
 checkKubeProxy(){
-  dsMode=`kubectl get ds -n kube-system | grep kube-proxy || true`
-  if [ -z "$dsMode" ]; then
+  if kubectl get ds -n kube-system --no-headers -o custom-columns=NAME:.metadata.name | grep -qw ^kube-proxy; then
+    checkDaemonSet kube-proxy
+  else
     nodeIps=`kubectl get node -o wide | grep -v "INTERNAL-IP" | awk '{print $6}'`
     for node in $nodeIps
     do
@@ -389,8 +439,6 @@ checkKubeProxy(){
         exit 1
       fi
     done
-  else
-    checkDaemonSet kube-proxy
   fi
   echo "kube-proxy ready"
 }
@@ -404,6 +452,7 @@ dbtool(){
       case $action in
         status)
           kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound
+          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnnb_db.ctl ovsdb-server/get-db-storage-status OVN_Northbound
           ;;
         kick)
           kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/kick OVN_Northbound "$1"
@@ -415,7 +464,7 @@ dbtool(){
           echo "backup ovn-$component db to $(pwd)/ovnnb_db.$suffix.backup"
           ;;
         dbstatus)
-          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnnb_db.ctl ovsdb-server/get-db-storage-status OVN_Northbound
+          getOvnCentralDbStatus
           ;;
         restore)
           # set ovn-central replicas to 0
@@ -460,14 +509,23 @@ dbtool(){
           # mv all db files
           for pod in ${podNameArray[@]}
           do
-            kubectl exec -it -n $KUBE_OVN_NS $pod -- mv /etc/ovn/ovnnb_db.db /tmp
-            kubectl exec -it -n $KUBE_OVN_NS $pod -- mv /etc/ovn/ovnsb_db.db /tmp
+            kubectl exec -it -n $KUBE_OVN_NS $pod -- mv -f /etc/ovn/ovnnb_db.db /tmp
+            kubectl exec -it -n $KUBE_OVN_NS $pod -- mv -f /etc/ovn/ovnsb_db.db /tmp
           done
 
           # restore db and replicas
           echo "restore nb db file, operate in pod ${podNameArray[0]}"
-          kubectl exec -it -n $KUBE_OVN_NS ${podNameArray[0]} -- mv /etc/ovn/ovnnb_db_standalone.db /etc/ovn/ovnnb_db.db
+          kubectl exec -it -n $KUBE_OVN_NS ${podNameArray[0]} -- mv -f /etc/ovn/ovnnb_db_standalone.db /etc/ovn/ovnnb_db.db
           kubectl scale deployment -n $KUBE_OVN_NS ovn-central --replicas=$replicas
+
+          # wait ovn-central pods running
+          availabelNum=$(kubectl get deployment -n $KUBE_OVN_NS | grep ovn-central | awk {'print $4'})
+          while [ $availabelNum != $replicas ]
+          do
+            availabelNum=$(kubectl get deployment -n $KUBE_OVN_NS | grep ovn-central | awk {'print $4'})
+            echo "wait all ovn-central pods running, availabel $availabelNum"
+            sleep 1
+          done
           echo "finish restore nb db file and ovn-central replicas"
 
           echo "recreate ovs-ovn pods"
@@ -481,6 +539,7 @@ dbtool(){
       case $action in
         status)
           kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound
+          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnsb_db.ctl ovsdb-server/get-db-storage-status OVN_Southbound
           ;;
         kick)
           kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/kick OVN_Southbound "$1"
@@ -492,7 +551,7 @@ dbtool(){
           echo "backup ovn-$component db to $(pwd)/ovnsb_db.$suffix.backup"
           ;;
         dbstatus)
-          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnsb_db.ctl ovsdb-server/get-db-storage-status OVN_Southbound
+          getOvnCentralDbStatus
           ;;
         restore)
           echo "restore cmd is only used for nb db"
@@ -504,6 +563,155 @@ dbtool(){
     *)
       echo "unknown subcommand $component"
   esac
+}
+
+tuning(){
+  action="$1"; shift
+  sys="$1"; shift
+  case $action in
+    install-fastpath)
+      case $sys in
+        centos7)
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp/:/tmp/ $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh  centos install"
+          while [ ! -f /tmp/kube_ovn_fastpath.ko ];
+          do
+            sleep 1
+          done
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
+          done
+          ;;
+        centos8)
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp/:/tmp/ $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh  centos install"
+          while [ ! -f /tmp/kube_ovn_fastpath.ko ];
+          do
+            sleep 1
+          done
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
+          done
+          ;;
+        *)
+          echo "unknown system $sys"
+      esac
+      ;;
+    local-install-fastpath)
+      case $sys in
+        centos7)
+          # shellcheck disable=SC2145
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh centos local-install $@"
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
+          done
+          ;;
+        centos8)
+          # shellcheck disable=SC2145
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh centos local-install $@"
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
+          done
+          ;;
+        *)
+          echo "unknown system $sys"
+      esac
+      ;;
+    remove-fastpath)
+      case $sys in
+        centos)
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            kubectl -n kube-system exec "$i" -- rm -f /tmp/kube_ovn_fastpath.ko
+          done
+          ;;
+        *)
+          echo "unknown system $sys"
+      esac
+      ;;
+    install-stt)
+      case $sys in
+        centos7)
+          # shellcheck disable=SC2145
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt install"
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            for k in /tmp/*.rpm; do
+              kubectl cp "$k" kube-system/"$i":/tmp/
+            done
+          done
+          ;;
+        centos8)
+          # shellcheck disable=SC2145
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt install"
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            for k in /tmp/*.rpm; do
+              kubectl cp "$k" kube-system/"$i":/tmp/
+            done
+          done
+          ;;
+        *)
+          echo "unknown system $sys"
+      esac
+      ;;
+    local-install-stt)
+      case $sys in
+        centos7)
+          # shellcheck disable=SC2145
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt local-install $@"
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            for k in /tmp/*.rpm; do
+              kubectl cp "$k" kube-system/"$i":/tmp/
+            done
+          done
+          ;;
+        centos8)
+          # shellcheck disable=SC2145
+          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt local-install $@"
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            for k in /tmp/*.rpm; do
+              kubectl cp "$k" kube-system/"$i":/tmp/
+            done
+          done
+          ;;
+        *)
+          echo "unknown system $sys"
+      esac
+      ;;
+    remove-stt)
+      case $sys in
+        centos)
+          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
+          do
+            kubectl -n kube-system exec "$i" -- rm -f /tmp/openvswitch-kmod*.rpm
+          done
+          ;;
+        *)
+          echo "unknown system $sys"
+      esac
+      ;;
+    *)
+      echo "unknown action $action"
+  esac
+}
+
+reload(){
+  kubectl delete pod -n kube-system -l app=ovn-central
+  kubectl rollout status deployment/ovn-central -n kube-system
+  kubectl delete pod -n kube-system -l app=ovs
+  kubectl delete pod -n kube-system -l app=kube-ovn-controller
+  kubectl rollout status deployment/kube-ovn-controller -n kube-system
+  kubectl delete pod -n kube-system -l app=kube-ovn-cni
+  kubectl rollout status daemonset/kube-ovn-cni -n kube-system
+  kubectl delete pod -n kube-system -l app=kube-ovn-pinger
+  kubectl rollout status daemonset/kube-ovn-pinger -n kube-system
+  kubectl delete pod -n kube-system -l app=kube-ovn-monitor
+  kubectl rollout status deployment/kube-ovn-monitor -n kube-system
 }
 
 if [ $# -lt 1 ]; then
@@ -536,6 +744,12 @@ case $subcommand in
     ;;
   diagnose)
     diagnose "$@"
+    ;;
+  reload)
+    reload
+    ;;
+  tuning)
+    tuning "$@"
     ;;
   *)
   showHelp

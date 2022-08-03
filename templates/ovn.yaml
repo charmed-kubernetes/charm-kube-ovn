@@ -1,7 +1,7 @@
 # DO NOT EDIT - For maintainability, we should keep this as close to the
 # upstream manifest as possible.
 #
-# https://raw.githubusercontent.com/kubeovn/kube-ovn/release-1.9/yamls/ovn.yaml
+# https://raw.githubusercontent.com/kubeovn/kube-ovn/v1.10.4/yamls/ovn.yaml
 
 apiVersion: policy/v1beta1
 kind: PodSecurityPolicy
@@ -62,20 +62,29 @@ rules:
   - apiGroups:
       - "kubeovn.io"
     resources:
-      - subnets
-      - subnets/status
       - vpcs
       - vpcs/status
       - vpc-nat-gateways
+      - subnets
+      - subnets/status
       - ips
+      - vips
+      - vips/status
       - vlans
       - vlans/status
       - provider-networks
       - provider-networks/status
-      - networks
       - security-groups
       - security-groups/status
       - htbqoses
+      - iptables-eips
+      - iptables-fip-rules
+      - iptables-dnat-rules
+      - iptables-snat-rules
+      - iptables-eips/status
+      - iptables-fip-rules/status
+      - iptables-dnat-rules/status
+      - iptables-snat-rules/status
     verbs:
       - "*"
   - apiGroups:
@@ -259,7 +268,7 @@ spec:
       hostNetwork: true
       containers:
         - name: ovn-central
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command: ["/kube-ovn/start-db.sh"]
           securityContext:
@@ -313,7 +322,7 @@ spec:
             exec:
               command:
                 - bash
-                - /kube-ovn/ovn-is-leader.sh
+                - /kube-ovn/ovn-healthcheck.sh
             periodSeconds: 15
             timeoutSeconds: 45
           livenessProbe:
@@ -392,7 +401,7 @@ spec:
       hostPID: true
       containers:
         - name: openvswitch
-          image: "kubeovn/kube-ovn:v1.9.2"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command: ["/kube-ovn/start-ovs.sh"]
           securityContext:
@@ -448,7 +457,7 @@ spec:
               command:
                 - bash
                 - /kube-ovn/ovs-healthcheck.sh
-            initialDelaySeconds: 10
+            initialDelaySeconds: 60
             periodSeconds: 5
             failureThreshold: 5
             timeoutSeconds: 45
