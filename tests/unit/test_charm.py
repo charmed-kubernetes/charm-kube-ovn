@@ -784,6 +784,7 @@ def test_apply_grafana_agent(
     harness.charm.stored.prometheus_patched = (
         harness.charm.stored.grafana_agent_configured
     ) = agent_configured
+    harness.charm.stored.grafana_namespace = "kube-ovn-grafana-agent"
 
     harness.charm.apply_grafana_agent("prometheus.local/api/v1")
 
@@ -796,7 +797,7 @@ def test_apply_grafana_agent(
     else:
         mock_patch.assert_called_once_with(patch_res, "kube-system")
         kubectl_calls.append(
-            mock.call(harness.charm, "create", "namespace", "grafana-agent")
+            mock.call(harness.charm, "create", "namespace", "kube-ovn-grafana-agent")
         )
     kubectl_calls.append(
         mock.call(harness.charm, "apply", "-f", mock_render.return_value)
@@ -942,7 +943,7 @@ def test_patch_prometheus_resources(mock_render, charm, kubectl, remove):
     else:
         mock_render_calls = [
             mock.call(
-                "patch-prometheus.yaml", scrape="true", port=res["port"], remove=False
+                "patch-prometheus.yaml", scrape=True, port=res["port"], remove=False
             )
             for res in test_resources
         ]

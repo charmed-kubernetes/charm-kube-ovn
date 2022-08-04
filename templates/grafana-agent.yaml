@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: grafana-agent
-  namespace: grafana-agent
+  namespace: {{ namespace }}
   labels:
     juju.io/application: {{ juju_app }}
 ---
@@ -44,7 +44,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: grafana-agent
-  namespace: grafana-agent
+  namespace: {{ namespace }}
 ---
 apiVersion: v1
 kind: Service
@@ -53,7 +53,7 @@ metadata:
     name: grafana-agent
     juju.io/application: {{ juju_app }}
   name: grafana-agent
-  namespace: grafana-agent
+  namespace: {{ namespace }}
 spec:
   clusterIP: None
   ports:
@@ -69,7 +69,7 @@ metadata:
   labels:
     juju.io/application: {{ juju_app }}
   name: grafana-agent
-  namespace: grafana-agent
+  namespace: {{ namespace }}
 spec:
   replicas: 1
   selector:

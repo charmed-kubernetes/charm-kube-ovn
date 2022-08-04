@@ -1,7 +1,7 @@
 kind: ConfigMap
 metadata:
   name: grafana-agent
-  namespace: grafana-agent
+  namespace: {{ namespace }}
   labels:
     juju.io/application: {{ juju_app }}
 apiVersion: v1
