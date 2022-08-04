@@ -889,7 +889,9 @@ def test_remove_grafana_agent(mock_patch, charm, kubectl):
     assert mock_patch.called_once_with(
         mock.call(patched_resources, "kube-system", remove=True)
     )
-    kubectl.assert_called_once_with(charm, "delete", "namespace", "grafana-agent")
+    kubectl.assert_called_once_with(
+        charm, "delete", "namespace", "kube-ovn-grafana-agent"
+    )
 
 
 def test_render_template(charm):
