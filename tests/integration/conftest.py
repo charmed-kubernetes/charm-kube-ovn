@@ -385,8 +385,7 @@ async def related_grafana(ops_test, grafana_app, k8s_model):
 
 
 @pytest_asyncio.fixture(scope="module")
-@pytest.mark.usefixtures("related_grafana")
-async def grafana_password(ops_test, k8s_model, grafana_app):
+async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
     grafana_model_obj, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias):
         action = (
@@ -399,8 +398,7 @@ async def grafana_password(ops_test, k8s_model, grafana_app):
 
 
 @pytest_asyncio.fixture(scope="module")
-@pytest.mark.usefixtures("grafana_app", "related_grafana")
-async def grafana_service(ops_test, client, k8s_model):
+async def grafana_service(ops_test, client, related_grafana, k8s_model, grafana_app):
     _, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias):
         grafana_model_name = ops_test.model_name
@@ -420,8 +418,9 @@ async def grafana_service(ops_test, client, k8s_model):
 
 
 @pytest_asyncio.fixture(scope="module")
-@pytest.mark.usefixtures("grafana_service")
-async def grafana_host(ops_test, worker_node):
+async def grafana_host(
+    ops_test, grafana_service, worker_node, related_grafana, k8s_model, grafana_app
+):
     worker_ip = None
     for address in worker_node.status.addresses:
         if address.type == "ExternalIP":
@@ -506,8 +505,9 @@ async def related_prometheus(ops_test, prometheus_app, k8s_model):
 
 
 @pytest_asyncio.fixture(scope="module")
-@pytest.mark.usefixtures("prometheus_app", "related_prometheus")
-async def prometheus_service(ops_test, client, k8s_model):
+async def prometheus_service(
+    ops_test, client, related_prometheus, k8s_model, prometheus_app
+):
     _, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias):
         prometheus_model_name = ops_test.model_name
@@ -527,8 +527,14 @@ async def prometheus_service(ops_test, client, k8s_model):
 
 
 @pytest_asyncio.fixture(scope="module")
-@pytest.mark.usefixtures("prometheus_service")
-async def prometheus_host(ops_test, worker_node):
+async def prometheus_host(
+    ops_test,
+    prometheus_service,
+    worker_node,
+    related_prometheus,
+    k8s_model,
+    prometheus_app,
+):
     worker_ip = None
     for address in worker_node.status.addresses:
         if address.type == "ExternalIP":
