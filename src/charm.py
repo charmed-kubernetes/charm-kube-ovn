@@ -3,7 +3,6 @@
 import json
 import logging
 import os
-import shutil
 import traceback
 import yaml
 
@@ -41,7 +40,6 @@ class KubeOvnCharm(CharmBase):
             self.on.kube_ovn_relation_changed, self.on_kube_ovn_relation_changed
         )
         self.framework.observe(self.on.config_changed, self.on_config_changed)
-        self.framework.observe(self.on.install, self.on_install)
         self.framework.observe(self.on.remove, self.on_remove)
         self.framework.observe(self.on.update_status, self.on_update_status)
         self.framework.observe(self.on.upgrade_charm, self.on_upgrade_charm)
@@ -245,10 +243,18 @@ class KubeOvnCharm(CharmBase):
         return node_ips
 
     def install_kubectl_plugin(self, plugin_name):
+        registry = self.get_registry()
+        if not registry:
+            log.info("Waiting for registry to install kubectl plugin")
+            return
         try:
             resource_path = self.get_charm_resource_path(plugin_name)
             plugin_path = Path(PLUGINS_PATH) / plugin_name
-            shutil.copy(resource_path, plugin_path)
+            plugin = resource_path.read_text()
+            plugin = plugin.replace(
+                'REGISTRY="kubeovn"', f'REGISTRY="{registry}/kubeovn"'
+            )
+            plugin_path.write_text(plugin)
             os.chmod(plugin_path, 0o755)
         except (ModelError, NameError) as e:
             log.error(f"Failed to install plugin {plugin_name}")
@@ -293,20 +299,20 @@ class KubeOvnCharm(CharmBase):
     def on_cni_relation_changed(self, event):
         self.cni_to_kube_ovn(event)
         self.configure_kube_ovn()
+        self.install_kubectl_plugin("kubectl-ko")
 
         self.set_active_status()
 
     def on_kube_ovn_relation_changed(self, event):
         self.configure_kube_ovn()
+        self.install_kubectl_plugin("kubectl-ko")
         self.set_active_status()
 
     def on_config_changed(self, event):
         self.configure_cni_relation()
         self.configure_kube_ovn()
-        self.set_active_status()
-
-    def on_install(self, _):
         self.install_kubectl_plugin("kubectl-ko")
+        self.set_active_status()
 
     def on_remove(self, _):
         self.remove_kubectl_plugin("kubectl-ko")

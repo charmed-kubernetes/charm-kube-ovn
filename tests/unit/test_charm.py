@@ -264,7 +264,6 @@ def test_get_registry(harness, charm):
 def test_load_manifest(charm):
     with pytest.raises(FileNotFoundError):
         charm.load_manifest("bogus.yaml")
-    assert charm.load_manifest("crd.yaml")
     assert charm.load_manifest("kube-ovn.yaml")
     assert charm.load_manifest("ovn.yaml")
 
@@ -667,19 +666,31 @@ def test_get_charm_resource_path(
         charm.get_charm_resource_path(expected_resource)
 
 
+@mock.patch("charm.KubeOvnCharm.model")
+def test_get_charm_resource_path_model_error(mock_model, charm):
+    mock_model.resources.fetch.side_effect = ModelError()
+    with pytest.raises(ModelError):
+        charm.get_charm_resource_path("kubectl-ko")
+
+
 @mock.patch("charm.KubeOvnCharm.get_charm_resource_path")
-@mock.patch("charm.shutil.copy")
+@mock.patch("charm.KubeOvnCharm.get_registry")
 @mock.patch("charm.os.chmod")
-def test_install_kubectl_plugin(mock_chmod, mock_copy, mock_get_resource, charm):
+@mock.patch("charm.Path")
+def test_install_kubectl_plugin(
+    mock_path, mock_chmod, mock_get_registry, mock_get_resource, charm
+):
     plugin_name = "test_plugin"
-    src_path = Path("/home/test") / plugin_name
-    dst_path = Path("/usr/local/bin") / plugin_name
-    mock_get_resource.return_value = src_path
+    mock_get_registry.return_value = "rocks.canonical.com:443/cdk"
+    mock_get_resource.return_value.read_text.return_value = 'REGISTRY="kubeovn"'
+    mock_plugin_path = mock_path("/usr/local/bin") / plugin_name
 
     charm.install_kubectl_plugin(plugin_name)
 
-    mock_copy.assert_called_once_with(src_path, dst_path)
-    mock_chmod.assert_called_once_with(dst_path, 0o755)
+    mock_plugin_path.write_text.assert_called_once_with(
+        'REGISTRY="rocks.canonical.com:443/cdk/kubeovn"'
+    )
+    mock_chmod.assert_called_once_with(mock_plugin_path, 0o755)
 
 
 @pytest.mark.parametrize(
@@ -700,11 +711,12 @@ def test_install_kubectl_plugin(mock_chmod, mock_copy, mock_get_resource, charm)
     ],
 )
 @mock.patch("charm.KubeOvnCharm.get_charm_resource_path")
-@mock.patch("charm.shutil.copy", mock.MagicMock())
+@mock.patch("charm.KubeOvnCharm.get_registry")
 @mock.patch("charm.os.chmod", mock.MagicMock())
 def test_install_kubectl_plugin_raises(
-    mock_get_resource, path, exception, log_message, charm, caplog
+    mock_get_registry, mock_get_resource, path, exception, log_message, charm, caplog
 ):
+    mock_get_registry.return_value = "rocks.canonical.com:443/cdk"
     mock_get_resource.side_effect = exception
     mock_get_resource.return_value = path
 
@@ -729,12 +741,6 @@ def test_remove_kubectl_plugin_raises(mock_remove, charm, caplog):
     charm.remove_kubectl_plugin("test_plugin")
 
     assert "Failed to remove plugin" in caplog.text
-
-
-@mock.patch("charm.KubeOvnCharm.install_kubectl_plugin")
-def test_on_install(mock_install, charm, harness):
-    charm.on_install("mock_event")
-    mock_install.assert_called_once_with("kubectl-ko")
 
 
 @mock.patch("charm.KubeOvnCharm.remove_kubectl_plugin")
