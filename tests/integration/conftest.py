@@ -446,7 +446,7 @@ async def prometheus_app(ops_test, k8s_model):
     _, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as m:
         log.info("Deploying prometheus-k8s ...")
-        await m.deploy(entity_url="prometheus-k8s", trust=True, channel="edge")
+        await m.deploy(entity_url="prometheus-k8s", trust=True, channel="beta")
 
         await m.block_until(lambda: "prometheus-k8s" in m.applications, timeout=60 * 3)
         await m.wait_for_idle(
