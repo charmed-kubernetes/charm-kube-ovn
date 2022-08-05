@@ -226,7 +226,7 @@ async def test_gateway_qos(
 
     # We need to wait a little bit for OVN to do its thing
     # after applying the annotations
-    await asyncio.sleep(30)
+    await asyncio.sleep(60)
 
     log.info("Testing node-level ingress bandwidth...")
     ingress_bw = await run_external_bandwidth_test(
