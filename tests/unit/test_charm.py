@@ -774,6 +774,7 @@ def test_apply_grafana_agent(
     patch_res = [
         {"kind": "deployment", "name": "kube-ovn-monitor", "port": 10661},
         {"kind": "daemonset", "name": "kube-ovn-pinger", "port": 8080},
+        {"kind": "deployment", "name": "kube-ovn-controller", "port": 10660},
         {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
     ]
     mock_render.return_value = "templates/test.yaml"
