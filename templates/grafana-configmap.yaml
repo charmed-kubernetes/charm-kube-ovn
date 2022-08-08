@@ -24,25 +24,22 @@ data:
         scrape_configs:
         - job_name: juju-kube-ovn-controller
           kubernetes_sd_configs:
-          - role: service
+          - role: pod
           relabel_configs:
           - action: keep
-            regex: .*metrics
-            source_labels: [__meta_kubernetes_service_port_name]
-          - action: keep
-            regex: .*kube-ovn-controller
-            source_labels: [__meta_kubernetes_service_name]
+            regex: kube-ovn-controller.*
+            source_labels: [__meta_kubernetes_pod_name]
           - action: replace
             regex: ([^:]+)(?::\d+)?;(\d+)
             replacement: $1:$2
-            source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+            source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
             target_label: __address__
           - {action: labelmap, regex: __meta_kubernetes_service_label_(.+)}
           - action: replace
             source_labels: [__meta_kubernetes_namespace]
             target_label: kubernetes_namespace
           - action: replace
-            source_labels: [__meta_kubernetes_service_name]
+            source_labels: [__meta_kubernetes_pod_name]
             target_label: kubernetes_name
         - job_name: juju-kube-ovn-monitor
           kubernetes_sd_configs:

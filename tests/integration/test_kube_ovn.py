@@ -267,9 +267,11 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     while not await prometheus.is_ready():
         log.info("Waiting for Prometheus to be ready...")
         await asyncio.sleep(5)
+    log.info("Waiting for metrics...")
+    await asyncio.sleep(60)
     metrics = await prometheus.metrics_all()
 
-    assert set(expected_prometheus_metrics) == set(metrics)
+    assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
 async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):

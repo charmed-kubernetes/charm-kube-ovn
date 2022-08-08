@@ -332,15 +332,17 @@ async def grafana_app(ops_test, k8s_model):
     yield "grafana-k8s"
 
     with ops_test.model_context(k8s_alias) as m:
-        log.info("Removing grafana-k8s application ...")
-        cmd = "remove-application grafana-k8s --destroy-storage --force"
-        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-        log.info(stdout)
-        log.info(stderr)
-        assert rc == 0
-        await m.block_until(
-            lambda: "grafana-k8s" not in m.applications, timeout=60 * 10
-        )
+        keep = ops_test.keep_model
+        if not keep:
+            log.info("Removing grafana-k8s application ...")
+            cmd = "remove-application grafana-k8s --destroy-storage --force"
+            rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+            log.info(stdout)
+            log.info(stderr)
+            assert rc == 0
+            await m.block_until(
+                lambda: "grafana-k8s" not in m.applications, timeout=60 * 10
+            )
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -394,7 +396,7 @@ async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
             .run_action("get-admin-password")
         )
         action = await action.wait()
-    return action.results["admin-password"]
+    return action["admin-password"]
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -459,15 +461,17 @@ async def prometheus_app(ops_test, k8s_model):
     yield "prometheus-k8s"
 
     with ops_test.model_context(k8s_alias) as m:
-        log.info("Removing prometheus-k8s application ...")
-        cmd = "remove-application prometheus-k8s --destroy-storage --force"
-        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-        log.info(stdout)
-        log.info(stderr)
-        assert rc == 0
-        await m.block_until(
-            lambda: "prometheus-k8s" not in m.applications, timeout=60 * 10
-        )
+        keep = ops_test.keep_model
+        if not keep:
+            log.info("Removing prometheus-k8s application ...")
+            cmd = "remove-application prometheus-k8s --destroy-storage --force"
+            rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+            log.info(stdout)
+            log.info(stderr)
+            assert rc == 0
+            await m.block_until(
+                lambda: "prometheus-k8s" not in m.applications, timeout=60 * 10
+            )
 
 
 @pytest_asyncio.fixture(scope="module")
