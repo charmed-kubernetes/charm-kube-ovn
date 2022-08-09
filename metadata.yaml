@@ -9,6 +9,8 @@ requires:
   cni:
     interface: kubernetes-cni
     scope: container
+  send-remote-write:
+    interface: prometheus_remote_write
 provides:
   grafana-dashboard:
     interface: grafana_dashboard

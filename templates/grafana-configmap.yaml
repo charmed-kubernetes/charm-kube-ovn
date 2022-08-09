@@ -1,0 +1,100 @@
+kind: ConfigMap
+metadata:
+  name: grafana-agent
+  namespace: {{ namespace }}
+  labels:
+    juju.io/application: {{ juju_app }}
+apiVersion: v1
+data:
+  agent.yaml: |
+    metrics:
+      wal_directory: /var/lib/agent/wal
+      global:
+        scrape_interval: 10s
+        external_labels:
+          juju_model_name: {{ juju_model }}
+          juju_model_uuid: {{ juju_model_uuid }}
+          juju_application: {{ juju_app }}
+      configs:
+      - name: integrations
+        remote_write:
+        {%- for item in remote_endpoints %}
+        - url: {{ item.url }}
+        {%- endfor %}
+        scrape_configs:
+        - job_name: juju-kube-ovn-controller
+          kubernetes_sd_configs:
+          - role: pod
+          relabel_configs:
+          - action: keep
+            regex: kube-ovn-controller.*
+            source_labels: [__meta_kubernetes_pod_name]
+          - action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            target_label: __address__
+          - {action: labelmap, regex: __meta_kubernetes_service_label_(.+)}
+          - action: replace
+            source_labels: [__meta_kubernetes_namespace]
+            target_label: kubernetes_namespace
+          - action: replace
+            source_labels: [__meta_kubernetes_pod_name]
+            target_label: kubernetes_name
+        - job_name: juju-kube-ovn-monitor
+          kubernetes_sd_configs:
+          - role: pod
+          relabel_configs:
+          - action: keep
+            regex: kube-ovn-monitor.*
+            source_labels: [__meta_kubernetes_pod_name]
+          - action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            target_label: __address__
+          - {action: labelmap, regex: __meta_kubernetes_service_label_(.+)}
+          - action: replace
+            source_labels: [__meta_kubernetes_namespace]
+            target_label: kubernetes_namespace
+          - action: replace
+            source_labels: [__meta_kubernetes_pod_name]
+            target_label: kubernetes_name
+        - job_name: juju-kube-ovn-cni
+          kubernetes_sd_configs:
+          - role: pod
+          relabel_configs:
+          - action: keep
+            regex: kube-ovn-cni.*
+            source_labels: [__meta_kubernetes_pod_name]
+          - action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            target_label: __address__
+          - {action: labelmap, regex: __meta_kubernetes_service_label_(.+)}
+          - action: replace
+            source_labels: [__meta_kubernetes_namespace]
+            target_label: kubernetes_namespace
+          - action: replace
+            source_labels: [__meta_kubernetes_pod_name]
+            target_label: kubernetes_name
+        - job_name: juju-kube-ovn-pinger
+          kubernetes_sd_configs:
+          - role: pod
+          relabel_configs:
+          - action: keep
+            regex: kube-ovn-pinger.*
+            source_labels: [__meta_kubernetes_pod_name]
+          - action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            target_label: __address__
+          - {action: labelmap, regex: __meta_kubernetes_service_label_(.+)}
+          - action: replace
+            source_labels: [__meta_kubernetes_namespace]
+            target_label: kubernetes_namespace
+          - action: replace
+            source_labels: [__meta_kubernetes_pod_name]
+            target_label: kubernetes_name

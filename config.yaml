@@ -14,6 +14,11 @@ options:
     default: "192.168.0.1"
     description: |
       Default gateway for the pod network
+  default-grafana-namespace:
+    type: string
+    default: "kube-ovn-grafana-agent"
+    description: |
+      Default namespace for the grafana agent deployment (This value cannot be changed after deployment).
   node-switch-cidr:
     type: string
     default: "100.64.0.0/16"

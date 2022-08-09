@@ -2,11 +2,11 @@ from math import isclose
 from pathlib import Path
 from pytest_operator.plugin import OpsTest
 from grafana import Grafana
+from prometheus import Prometheus
 import asyncio
 import shlex
 import pytest
 import logging
-import re
 import subprocess
 import time
 import json
@@ -123,13 +123,13 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {pod_prior.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} -p 5101 | tail -3"'
+        f'-- sh -c "iperf3 -c {server_ip} -p 5101 -JZ"'
     )
     cmd.append(
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {pod_non_prior.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} -p 5102 | tail -3"'
+        f'-- sh -c "iperf3 -c {server_ip} -p 5102 -JZ"'
     )
 
     processes = []
@@ -143,8 +143,8 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
         out, _ = p.communicate()
         results.append(out.decode("utf-8"))
 
-    prior_bw = parse_iperf_result(results[0])
-    non_prior_bw = parse_iperf_result(results[1])
+    _, prior_bw = parse_iperf_result(results[0])
+    _, non_prior_bw = parse_iperf_result(results[1])
 
     assert prior_bw > non_prior_bw
 
@@ -226,7 +226,7 @@ async def test_gateway_qos(
 
     # We need to wait a little bit for OVN to do its thing
     # after applying the annotations
-    await asyncio.sleep(30)
+    await asyncio.sleep(60)
 
     log.info("Testing node-level ingress bandwidth...")
     ingress_bw = await run_external_bandwidth_test(
@@ -260,6 +260,18 @@ async def test_grafana(
         actual_dashboard_titles.append(dashboard["title"])
 
     assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
+
+
+async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
+    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+    while not await prometheus.is_ready():
+        log.info("Waiting for Prometheus to be ready...")
+        await asyncio.sleep(5)
+    log.info("Waiting for metrics...")
+    await asyncio.sleep(60)
+    metrics = await prometheus.metrics_all()
+
+    assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
 async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
@@ -314,10 +326,29 @@ async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
 
 
 def parse_iperf_result(output):
-    # First line contains test result
-    line = output.split("\n")[0]
-    # Sixth value contains the average bandwidth value
-    return float(re.sub(" +", " ", line).split(" ")[6])
+    # iperf3 output looks like this:
+    # {
+    #   start: {...},
+    #   intervals: {...},
+    #   end: {
+    #     sum_sent: {
+    #       streams: {...},
+    #       sum_sent: {
+    #         ...,
+    #         bits_per_second: xxx.xxx,
+    #         ...
+    #       },
+    #       sum_received: {...},
+    #     }
+    #   },
+    # }
+
+    result = json.loads(output)
+    # Extract the average values in bps and convert into mbps.
+    sum_sent = float(result["end"]["sum_sent"]["bits_per_second"]) / 1e6
+    sum_received = float(result["end"]["sum_received"]["bits_per_second"]) / 1e6
+
+    return (sum_sent, sum_received)
 
 
 async def run_bandwidth_test(
@@ -340,12 +371,13 @@ async def run_bandwidth_test(
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {client.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} {reverse_flag} -p 5101 | tail -3"'
+        f'-- sh -c "iperf3 -c {server_ip} {reverse_flag} -p 5101 -JZ"'
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
-    return parse_iperf_result(stdout)
+    _, sum_received = parse_iperf_result(stdout)
+    return sum_received
 
 
 async def run_external_bandwidth_test(
@@ -356,12 +388,13 @@ async def run_external_bandwidth_test(
         f"kubectl --kubeconfig {kubeconfig} "
         f"exec {client.metadata.name} "
         f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server} {reverse_flag} | tail -3"'
+        f'-- sh -c "iperf3 -c {server} {reverse_flag} -JZ"'
     )
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
 
-    return parse_iperf_result(stdout)
+    _, sum_received = parse_iperf_result(stdout)
+    return sum_received
 
 
 async def ping(ops_test, pinger, pingee, namespace, kubeconfig):

@@ -1,0 +1,11 @@
+spec:
+  template:
+    metadata:
+      annotations:
+        {%- if remove %}
+        prometheus.io/scrape: {{ scrape }}
+        prometheus.io/port: {{ port }}
+        {% else %}
+        prometheus.io/scrape: {{ scrape|string|tojson }}
+        prometheus.io/port: {{ port|string|tojson }}
+        {% endif %}
