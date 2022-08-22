@@ -1,9 +1,18 @@
-# Kube-OVN charm
+# Kube-OVN Charm
 
-This is an experimental proof-of-concept charm for using Kube-OVN with
-Charmed Kubernetes. This is a subordinate machine charm that relates to
-kubernetes-control-plane and kubernetes-worker via the kubernetes-cni
+Kube-OVN is a CNI implementation based on OVN that provides a rich
+set of networking features for advanced enterprise applications.
+
+This charm will deploy Kube-OVN as a background service, and configure CNI for
+use with Kube-OVN, on any principal charm that implements the [kubernetes-cni][]
 interface.
+
+This charm is a component of Charmed Kubernetes. For full information,
+please visit the [official Charmed Kubernetes docs](https://www.ubuntu.com/kubernetes/docs/charm-kube-ovn).
+
+[kubernetes-cni]: https://github.com/juju-solutions/interface-kubernetes-cni
+
+# Developers
 
 ## Building
 
