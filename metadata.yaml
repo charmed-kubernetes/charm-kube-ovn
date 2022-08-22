@@ -1,6 +1,7 @@
 name: kube-ovn
 summary: kube-ovn
 description: kube-ovn
+docs: https://discourse.charmhub.io/t/kube-ovn-docs-index/6929
 subordinate: true
 series:
   - focal
