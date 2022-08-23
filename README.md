@@ -1,6 +1,6 @@
 # Kube-OVN Charm
 
-Kube-OVN is a CNI implementation based on OVN that provides a rich
+[Kube-OVN][] is a CNI implementation based on OVN that provides a rich
 set of networking features for advanced enterprise applications.
 
 This charm will deploy Kube-OVN as a background service, and configure CNI for
@@ -10,6 +10,7 @@ interface.
 This charm is a component of Charmed Kubernetes. For full information,
 please visit the [official Charmed Kubernetes docs](https://www.ubuntu.com/kubernetes/docs/charm-kube-ovn).
 
+[kube-ovn]: https://kubeovn.github.io/docs/v1.10.x/en/
 [kubernetes-cni]: https://github.com/juju-solutions/interface-kubernetes-cni
 
 # Developers
