@@ -2,6 +2,7 @@
 # upstream manifest as possible.
 #
 # N.B There is not a 1.25 release yet so using master branch yaml
+# The master branch version uses 1.10.0 as its ovn images, and these have been modified to 1.10.4
 # https://raw.githubusercontent.com/kubeovn/kube-ovn/master/yamls/ovn.yaml
 
 apiVersion: v1
@@ -235,7 +236,7 @@ spec:
       hostNetwork: true
       containers:
         - name: ovn-central
-          image: "kubeovn/kube-ovn:v1.10.0"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command: ["/kube-ovn/start-db.sh"]
           securityContext:
@@ -368,7 +369,7 @@ spec:
       hostPID: true
       containers:
         - name: openvswitch
-          image: "kubeovn/kube-ovn:v1.10.0"
+          image: "kubeovn/kube-ovn:v1.10.4"
           imagePullPolicy: IfNotPresent
           command: ["/kube-ovn/start-ovs.sh"]
           securityContext:
