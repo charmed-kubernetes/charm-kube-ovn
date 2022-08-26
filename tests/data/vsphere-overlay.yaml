@@ -11,7 +11,7 @@ applications:
     trust: true
     options:
       datastore: vsanDatastore
-      folder: k8s-crew-root
+      folder: k8s-ci-root
 relations:
   - ['vsphere-integrator', 'kubernetes-control-plane']
   - ['vsphere-integrator', 'kubernetes-worker']
