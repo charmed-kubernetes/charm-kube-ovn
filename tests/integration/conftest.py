@@ -396,7 +396,7 @@ async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
             .run_action("get-admin-password")
         )
         action = await action.wait()
-    return action["admin-password"]
+    return action.results["admin-password"]
 
 
 @pytest_asyncio.fixture(scope="module")
