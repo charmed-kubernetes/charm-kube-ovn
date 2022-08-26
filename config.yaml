@@ -23,12 +23,14 @@ options:
     type: string
     default: "100.64.0.0/16"
     description: |
-      CIDR for node switch (This value cannot be changed after deployment).
+      CIDR for node switch (This value requires additional steps/procedures to be changed. Refer to 
+      the charm docs for more information).
   node-switch-gateway:
     type: string
     default: "100.64.0.1"
     description: |
-      Gateway for node switch (This value cannot be changed after deployment).
+      Gateway for node switch (This value requires additional steps/procedures to be changed. Refer to 
+      the charm docs for more information).
   pinger-external-address:
     type: string
     default: "8.8.8.8"
