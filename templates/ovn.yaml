@@ -1,46 +1,10 @@
 # DO NOT EDIT - For maintainability, we should keep this as close to the
 # upstream manifest as possible.
 #
-# https://raw.githubusercontent.com/kubeovn/kube-ovn/v1.10.4/yamls/ovn.yaml
+# N.B There is not a 1.25 release yet so using master branch yaml
+# The master branch version uses 1.10.0 as its ovn images, and these have been modified to 1.10.4
+# https://raw.githubusercontent.com/kubeovn/kube-ovn/master/yamls/ovn.yaml
 
-apiVersion: policy/v1beta1
-kind: PodSecurityPolicy
-metadata:
-  name: kube-ovn
-  annotations:
-    seccomp.security.alpha.kubernetes.io/allowedProfileNames: '*'
-spec:
-  privileged: true
-  allowPrivilegeEscalation: true
-  allowedCapabilities:
-    - '*'
-  volumes:
-    - '*'
-  hostNetwork: true
-  hostPorts:
-    - min: 0
-      max: 65535
-  hostIPC: true
-  hostPID: true
-  runAsUser:
-    rule: 'RunAsAny'
-  seLinux:
-    rule: 'RunAsAny'
-  supplementalGroups:
-    rule: 'RunAsAny'
-  fsGroup:
-    rule: 'RunAsAny'
-
----
-
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: ovn-config
-  namespace: kube-system
-data:
-  defaultNetworkType: geneve
----
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -54,11 +18,6 @@ metadata:
     rbac.authorization.k8s.io/system-only: "true"
   name: system:ovn
 rules:
-  - apiGroups: ['policy']
-    resources: ['podsecuritypolicies']
-    verbs:     ['use']
-    resourceNames:
-      - kube-ovn
   - apiGroups:
       - "kubeovn.io"
     resources:
@@ -85,6 +44,8 @@ rules:
       - iptables-fip-rules/status
       - iptables-dnat-rules/status
       - iptables-snat-rules/status
+      - switch-lb-rules
+      - switch-lb-rules/status
     verbs:
       - "*"
   - apiGroups:
@@ -120,6 +81,7 @@ rules:
     resources:
       - networkpolicies
       - services
+      - services/status
       - endpoints
       - statefulsets
       - daemonsets
@@ -141,6 +103,12 @@ rules:
       - create
       - patch
       - update
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - "*"
   - apiGroups:
       - "k8s.cni.cncf.io"
     resources:
@@ -395,7 +363,7 @@ spec:
           operator: Exists
         - key: CriticalAddonsOnly
           operator: Exists
-      priorityClassName: system-cluster-critical
+      priorityClassName: system-node-critical
       serviceAccountName: ovn
       hostNetwork: true
       hostPID: true
