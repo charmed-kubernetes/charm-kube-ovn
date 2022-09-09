@@ -8,7 +8,7 @@ use with Kube-OVN, on any principal charm that implements the [kubernetes-cni][]
 interface.
 
 This charm is a component of Charmed Kubernetes. For full information,
-please visit the [official Charmed Kubernetes docs](https://www.ubuntu.com/kubernetes/docs/charm-kube-ovn).
+please visit the [official Charmed Kubernetes docs](https://ubuntu.com/kubernetes/docs/cni-kube-ovn).
 
 [kube-ovn]: https://kubeovn.github.io/docs/v1.10.x/en/
 [kubernetes-cni]: https://github.com/juju-solutions/interface-kubernetes-cni
