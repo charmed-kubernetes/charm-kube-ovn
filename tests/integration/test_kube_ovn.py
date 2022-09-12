@@ -418,7 +418,7 @@ async def ping(ops_test, pinger, pingee, namespace, kubeconfig):
     return stdout
 
 
-def _ping_parse(stdout:str, line_filter: str, regex: re.Pattern, idx: int):
+def _ping_parse(stdout: str, line_filter: str, regex: re.Pattern, idx: int):
     # ping output looks like this:
     # PING google.com(dfw28s31-in-x0e.1e100.net (2607:f8b0:4000:818::200e))
     # 56 data bytes
@@ -433,14 +433,17 @@ def _ping_parse(stdout:str, line_filter: str, regex: re.Pattern, idx: int):
     lines = [line for line in stdout.splitlines() if line_filter in line]
     assert len(lines) == 1, f"'{line_filter}' not found in ping response: {stdout}"
     matches = regex.findall(lines[0])
-    assert len(matches) > idx, f"'{line_filter}' not parsable in ping response: {stdout}"
+    assert (
+        len(matches) > idx
+    ), f"'{line_filter}' not parsable in ping response: {stdout}"
     return matches[idx]
 
 
-def avg_ping_delay(stdout):
+def avg_ping_delay(stdout: str) -> float:
     return float(_ping_parse(stdout, "min/avg/max", PING_LATENCY_RE, 1))
 
-def ping_loss(stdout):
+
+def ping_loss(stdout: str) -> float:
     return float(_ping_parse(stdout, "packet loss", PING_LOSS_RE, 0))
 
 
