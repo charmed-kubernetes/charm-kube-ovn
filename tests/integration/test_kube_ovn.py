@@ -325,7 +325,7 @@ async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
     await kubectl("delete", "-f", manifest_path)
 
 
-def parse_iperf_result(output):
+def parse_iperf_result(output: str):
     # iperf3 output looks like this:
     # {
     #   start: {...},
@@ -343,7 +343,11 @@ def parse_iperf_result(output):
     #   },
     # }
 
-    result = json.loads(output)
+    try:
+        result = json.loads(output)
+    except json.decoder.JSONDecodeError:
+        log.error(f"Cannot parse iperf json results: {output}")
+        raise
     # Extract the average values in bps and convert into mbps.
     sum_sent = float(result["end"]["sum_sent"]["bits_per_second"]) / 1e6
     sum_received = float(result["end"]["sum_received"]["bits_per_second"]) / 1e6
