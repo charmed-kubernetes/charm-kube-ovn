@@ -10,6 +10,7 @@ import logging
 import subprocess
 import time
 import json
+import re
 
 from ipaddress import ip_address, ip_network
 
@@ -18,6 +19,8 @@ log = logging.getLogger(__name__)
 
 LOW_PRIORITY_HTB = "300"
 NEW_PRIORITY_HTB = "50"
+PING_LATENCY_RE = re.compile(r"(?:(\d+.\d+)\/?)")
+PING_LOSS_RE = re.compile(r"(?:([\d\.]+)% packet loss)")
 
 
 @pytest.mark.abort_on_fail
@@ -165,7 +168,7 @@ async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
 
     log.info("Testing ping latency ...")
     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-    average_latency = parse_ping_delay(stdout)
+    average_latency = avg_ping_delay(stdout)
     assert isclose(average_latency, latency, rel_tol=0.05)
 
 
@@ -176,7 +179,7 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
     # Test loss before applying the annotation
     log.info("Testing ping loss ...")
     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-    actual_loss = parse_ping_loss(stdout)
+    actual_loss = ping_loss(stdout)
     assert actual_loss == 0
 
     # Annotate and test again
@@ -186,7 +189,7 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
 
     log.info("Testing ping loss ...")
     stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-    actual_loss = parse_ping_loss(stdout)
+    actual_loss = ping_loss(stdout)
     assert actual_loss == expected_loss
 
 
@@ -415,7 +418,7 @@ async def ping(ops_test, pinger, pingee, namespace, kubeconfig):
     return stdout
 
 
-def parse_ping_delay(stdout):
+def _ping_parse(stdout:str, line_filter: str, regex: re.Pattern, idx: int):
     # ping output looks like this:
     # PING google.com(dfw28s31-in-x0e.1e100.net (2607:f8b0:4000:818::200e))
     # 56 data bytes
@@ -427,20 +430,18 @@ def parse_ping_delay(stdout):
     # --- google.com ping statistics ---
     # 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
     # rtt min/avg/max/mdev = 50.860/284.419/517.978/233.559 ms
+    lines = [line for line in stdout.splitlines() if line_filter in line]
+    assert len(lines) == 1, f"'{line_filter}' not found in ping response: {stdout}"
+    matches = regex.findall(lines[0])
+    assert len(matches) > idx, f"'{line_filter}' not parsable in ping response: {stdout}"
+    return matches[idx]
 
-    lines = stdout.splitlines()
-    delay_line = lines[-1]
-    delay_stats = delay_line.split("=")[-1]
-    average_delay = delay_stats.split("/")[1]
-    return float(average_delay)
 
+def avg_ping_delay(stdout):
+    return float(_ping_parse(stdout, "min/avg/max", PING_LATENCY_RE, 1))
 
-def parse_ping_loss(stdout):
-    lines = stdout.splitlines()
-    loss_line = [line for line in lines if "loss" in line][0]
-    loss_stats = loss_line.split(",")[2]
-    loss_percentage = loss_stats.split("%")[0]
-    return float(loss_percentage)
+def ping_loss(stdout):
+    return float(_ping_parse(stdout, "packet loss", PING_LOSS_RE, 0))
 
 
 def parse_ip_link(stdout):
