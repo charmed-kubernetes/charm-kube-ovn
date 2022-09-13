@@ -7,12 +7,17 @@ import asyncio
 import shlex
 import pytest
 import logging
-import time
 import json
 import re
 
 from ipaddress import ip_address, ip_network
-from retry import async_retry
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_fixed,
+)
 
 
 log = logging.getLogger(__name__)
@@ -257,7 +262,11 @@ async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
     await kubectl("apply", "-f", manifest_path)
 
-    @async_retry(exceptions=AssertionError, delay=1, max_seconds=600)
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+    )
     async def pod_ip_addr():
         pod = "test-multi-nic-ipam"
         await kubectl_exec(pod, "default", "apt-get update")
@@ -295,7 +304,6 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert len(iface_addrs["net1"]) == 1
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
-
 
 
 class iPerfError(Exception):
@@ -339,7 +347,11 @@ def parse_iperf_result(output: str):
     return sum_sent, sum_received
 
 
-@async_retry(exceptions=iPerfError, tries=3, logger=log)
+@retry(
+    retry=retry_if_exception_type(iPerfError),
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+)
 async def run_bandwidth_test(kubectl_exec, server, client, namespace, reverse=False):
     server_ip = server.status.podIP
 
@@ -357,7 +369,11 @@ async def run_bandwidth_test(kubectl_exec, server, client, namespace, reverse=Fa
     return sum_received
 
 
-@async_retry(exceptions=iPerfError, tries=3, logger=log)
+@retry(
+    retry=retry_if_exception_type(iPerfError),
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+)
 async def run_external_bandwidth_test(
     kubectl_exec, server, client, namespace, reverse=False
 ):
