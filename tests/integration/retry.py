@@ -8,6 +8,7 @@ import asyncio
 from functools import wraps
 import random
 import logging
+import time
 
 
 def async_retry(
@@ -18,6 +19,7 @@ def async_retry(
     backoff=1,
     jitter=0,
     logger=logging,
+    max_seconds=None
 ):
     """Return a retry decorator for an async function
 
@@ -30,12 +32,16 @@ def async_retry(
                    fixed if a number, random if a range tuple (min, max)
     :param logger: logger.warning(fmt, error, delay) will be called on failed attempts.
                    default: root logger. if None, logging is disabled.
+    :param deadline: maxiumum time spent retrying
     """
 
     def decorator(f):
         @wraps(f)
         async def wrapped(*fargs, **fkwargs):
             _tries, _delay = tries, delay
+            _deadline = None
+            if max_seconds is not None:
+                _deadline = time.time() + max_seconds
             while _tries:
                 try:
                     return await f(*fargs, **fkwargs)
@@ -43,6 +49,9 @@ def async_retry(
                     _tries -= 1
                     if not _tries:
                         raise
+                    if _deadline and _deadline > time.time():
+                        raise
+
                     if logger is not None:
                         logger.warning("%s, retrying in %s seconds...", e, _delay)
 

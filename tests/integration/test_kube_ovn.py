@@ -252,25 +252,29 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
-@pytest.mark.usefixtures("multus_installed")
-async def test_multi_nic_ipam(kubectl, kubectl_exec):
+@pytest.fixture()
+async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
     await kubectl("apply", "-f", manifest_path)
 
-    deadline = time.time() + 600
-    pod = "test-multi-nic-ipam"
-    while True:
-        try:
-            await kubectl_exec(pod, "default", "apt-get update")
-            await kubectl_exec(pod, "default", "apt-get install -y iproute2")
-            ip_addr_output = await kubectl_exec(pod, "default", "ip -j addr")
-            break
-        except AssertionError:
-            if time.time() > deadline:
-                raise
-        await asyncio.sleep(1)
+    @async_retry(exceptions=AssertionError, delay=1, max_seconds=600)
+    async def pod_ip_addr():
+        pod = "test-multi-nic-ipam"
+        await kubectl_exec(pod, "default", "apt-get update")
+        await kubectl_exec(pod, "default", "apt-get install -y iproute2")
+        return await kubectl_exec(pod, "default", "ip -j addr")
 
-    ifaces = json.loads(ip_addr_output)
+    ip_addr_output = await pod_ip_addr()
+
+    try:
+        yield ip_addr_output
+    finally:
+        await kubectl("delete", "-f", manifest_path)
+
+
+@pytest.mark.usefixtures("multus_installed")
+async def test_multi_nic_ipam(multi_nic_ipam):
+    ifaces = json.loads(multi_nic_ipam)
     iface_addrs = {
         iface["ifname"]: [
             addr for addr in iface["addr_info"] if addr["family"] == "inet"
@@ -292,7 +296,6 @@ async def test_multi_nic_ipam(kubectl, kubectl_exec):
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
 
-    await kubectl("delete", "-f", manifest_path)
 
 
 class iPerfError(Exception):
