@@ -49,13 +49,11 @@ async def test_build_and_deploy(ops_test: OpsTest):
 
     log.info("Deploy charm...")
     model = ops_test.model_full_name
-    cmd = f"juju deploy -m {model} {bundle} --trust " + " ".join(
+    juju_cmd = f"deploy -m {model} {bundle} --trust " + " ".join(
         f"--overlay={f}" for f in overlays
     )
 
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Bundle deploy failed: {(stderr or stdout).strip()}"
-
+    await ops_test.juju(*shlex.split(juju_cmd), fail_msg="Bundle deploy failed")
     await ops_test.model.block_until(
         lambda: "kube-ovn" in ops_test.model.applications, timeout=60
     )
@@ -67,9 +65,9 @@ async def test_kubectl_ko_plugin(ops_test):
     units = ops_test.model.applications["kube-ovn"].units
     machines = [u.machine.entity_id for u in units]
     for m in machines:
-        cmd = f"juju ssh {m} -- kubectl ko nbctl show"
-        await ops_test.run(
-            *shlex.split(cmd),
+        juju_cmd = f"ssh {m} -- kubectl ko nbctl show"
+        await ops_test.juju(
+            *shlex.split(juju_cmd),
             check=True,
             fail_msg=f"Failed to execute kubectl-ko on machine:{m}",
         )
@@ -109,8 +107,8 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
 
     log.info("Setup iperf3 servers...")
     iperf3_cmd = "iperf3 -s -p 5101 --daemon && iperf3 -s -p 5102 --daemon"
-    rc, stdout, stderr = await kubectl_exec(server.metadata.name, namespace, iperf3_cmd)
-    assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
+    args = server.metadata.name, namespace, iperf3_cmd
+    await kubectl_exec(*args, fail_msg="Failed to setup iperf3 servers")
 
     new_priority_annotation = {"ovn.kubernetes.io/priority": f"{NEW_PRIORITY_HTB}"}
     await annotate_obj(client, pod_prior, new_priority_annotation)
@@ -183,15 +181,17 @@ async def test_pod_netem_limit(ops_test, client, iperf3_pods):
         await annotate_obj(client, pod, limit_annotation)
 
     log.info("Looking for kubernetes-worker/0 netem interface ...")
-    cmd = "juju run --unit kubernetes-worker/0 -- ip link"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run ip link: {(stdout or stderr).strip()}"
+    juju_cmd = "run --unit kubernetes-worker/0 -- ip link"
+    _, stdout, __ = await ops_test.juju(
+        *shlex.split(juju_cmd), fail_msg="Failed to run ip link"
+    )
 
     interface = parse_ip_link(stdout)
     log.info(f"Checking qdisk on interface {interface} for correct limit ...")
-    cmd = f"juju run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run tc qdisc show: {(stdout or stderr).strip()}"
+    juju_cmd = f"run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
+    _, stdout, __ = await ops_test.juju(
+        *shlex.split(juju_cmd), fail_msg="Failed to run tc qdisc show"
+    )
     actual_limit = parse_tc_show(stdout)
     assert actual_limit == expected_limit
 
@@ -390,7 +390,8 @@ async def ping(kubectl_exec, pinger, pingee, namespace):
     pingee_ip = pingee.status.podIP
     ping_cmd = f"ping {pingee_ip} -w 5"
     args = pinger.metadata.name, namespace, ping_cmd
-    return await kubectl_exec(*args, fail_msg=f"Failed to ping {pingee_ip}")
+    _, stdout, __ = await kubectl_exec(*args, check=False)
+    return stdout
 
 
 def _ping_parse(stdout: str, line_filter: str, regex: re.Pattern, idx: int):

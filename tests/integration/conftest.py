@@ -19,6 +19,7 @@ from lightkube.resources.core_v1 import Node
 from lightkube.generic_resource import create_global_resource
 from random import choices
 from string import ascii_lowercase, digits
+from typing import Union, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -160,10 +161,21 @@ def iperf3_pods(client):
 
 @pytest.fixture(scope="module")
 def kubectl(ops_test, kubeconfig):
-    async def f(*args, **kwargs):
+    """Supports running kubectl exec commands."""
+
+    KubeCtl = Union[str, Tuple[int, str, str]]
+
+    async def f(*args, **kwargs) -> KubeCtl:
+        """Actual callable returned by the fixture.
+
+        :returns: if kwargs[check] is True or undefined, stdout is returned
+                  if kwargs[check] is False, Tuple[rc, stdout, stderr] is returned
+        """
         cmd = ["kubectl", "--kubeconfig", str(kubeconfig)] + list(args)
-        kwargs["check"] = True
-        _, stdout, __ = await ops_test.run(*cmd, **kwargs)
+        check = kwargs["check"] = kwargs.get("check", True)
+        rc, stdout, stderr = await ops_test.run(*cmd, **kwargs)
+        if not check:
+            return rc, stdout, stderr
         return stdout
 
     return f
