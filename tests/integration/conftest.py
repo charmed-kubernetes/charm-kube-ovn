@@ -3,7 +3,6 @@ import os
 import juju.utils
 from juju.tag import untag
 import asyncio
-import subprocess
 import json
 import pytest
 import pytest_asyncio

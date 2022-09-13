@@ -10,7 +10,15 @@ import random
 import logging
 
 
-def async_retry(exceptions=Exception, tries=-1, delay=0, max_delay=None, backoff=1, jitter=0, logger=logging):
+def async_retry(
+    exceptions=Exception,
+    tries=-1,
+    delay=0,
+    max_delay=None,
+    backoff=1,
+    jitter=0,
+    logger=logging,
+):
     """Return a retry decorator for an async function
 
     :param exceptions: an exception or a tuple of exceptions to catch. default: Exception.
@@ -23,6 +31,7 @@ def async_retry(exceptions=Exception, tries=-1, delay=0, max_delay=None, backoff
     :param logger: logger.warning(fmt, error, delay) will be called on failed attempts.
                    default: root logger. if None, logging is disabled.
     """
+
     def decorator(f):
         @wraps(f)
         async def wrapped(*fargs, **fkwargs):
@@ -35,7 +44,7 @@ def async_retry(exceptions=Exception, tries=-1, delay=0, max_delay=None, backoff
                     if not _tries:
                         raise
                     if logger is not None:
-                        logger.warning('%s, retrying in %s seconds...', e, _delay)
+                        logger.warning("%s, retrying in %s seconds...", e, _delay)
 
                     await asyncio.sleep(_delay)
                     _delay *= backoff
@@ -49,4 +58,5 @@ def async_retry(exceptions=Exception, tries=-1, delay=0, max_delay=None, backoff
                         _delay = min(_delay, max_delay)
 
         return wrapped
+
     return decorator
