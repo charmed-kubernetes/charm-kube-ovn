@@ -160,16 +160,21 @@ def iperf3_pods(client):
 
 
 @pytest.fixture(scope="module")
-def kubectl(kubeconfig):
-    async def f(*args):
+def kubectl(ops_test, kubeconfig):
+    async def f(*args, **kwargs):
         cmd = ["kubectl", "--kubeconfig", str(kubeconfig)] + list(args)
-        process = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE)
-        output, _ = await process.communicate()
-        if process.returncode != 0:
-            raise subprocess.CalledProcessError(
-                returncode=process.returncode, cmd=cmd, output=output
-            )
-        return output
+        kwargs["check"] = True
+        _, stdout, __ = await ops_test.run(*cmd, **kwargs)
+        return stdout
+
+    return f
+
+
+@pytest.fixture(scope="module")
+def kubectl_exec(kubectl):
+    async def f(name: str, namespace: str, cmd: str, **kwds):
+        shcmd = f'exec {name} -n {namespace} -- sh -c "{cmd}"'
+        return await kubectl(*shlex.split(shcmd), **kwds)
 
     return f
 
