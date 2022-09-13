@@ -7,17 +7,25 @@ import asyncio
 import shlex
 import pytest
 import logging
-import subprocess
-import time
 import json
+import re
 
 from ipaddress import ip_address, ip_network
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_fixed,
+)
 
 
 log = logging.getLogger(__name__)
 
 LOW_PRIORITY_HTB = "300"
 NEW_PRIORITY_HTB = "50"
+PING_LATENCY_RE = re.compile(r"(?:(\d+.\d+)\/?)")
+PING_LOSS_RE = re.compile(r"(?:([\d\.]+)% packet loss)")
 
 
 @pytest.mark.abort_on_fail
@@ -41,13 +49,11 @@ async def test_build_and_deploy(ops_test: OpsTest):
 
     log.info("Deploy charm...")
     model = ops_test.model_full_name
-    cmd = f"juju deploy -m {model} {bundle} --trust " + " ".join(
+    juju_cmd = f"deploy -m {model} {bundle} --trust " + " ".join(
         f"--overlay={f}" for f in overlays
     )
 
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Bundle deploy failed: {(stderr or stdout).strip()}"
-
+    await ops_test.juju(*shlex.split(juju_cmd), fail_msg="Bundle deploy failed")
     await ops_test.model.block_until(
         lambda: "kube-ovn" in ops_test.model.applications, timeout=60
     )
@@ -55,19 +61,19 @@ async def test_build_and_deploy(ops_test: OpsTest):
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 60)
 
 
-async def test_kubectl_ko_plugin(ops_test: OpsTest):
+async def test_kubectl_ko_plugin(ops_test):
     units = ops_test.model.applications["kube-ovn"].units
     machines = [u.machine.entity_id for u in units]
-
     for m in machines:
-        cmd = f"juju ssh {m} kubectl ko nbctl show"
-        rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-        assert (
-            rc == 0
-        ), f"Failed to execute kubectl-ko on machine:{m} {(stderr or stdout).strip()}"
+        juju_cmd = f"ssh {m} -- kubectl ko nbctl show"
+        await ops_test.juju(
+            *shlex.split(juju_cmd),
+            check=True,
+            fail_msg=f"Failed to execute kubectl-ko on machine:{m}",
+        )
 
 
-async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
+async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
     server, test_pod, _ = iperf3_pods
     namespace = server.metadata.namespace
 
@@ -78,20 +84,18 @@ async def test_pod_network_limits(ops_test, kubeconfig, client, iperf3_pods):
     await annotate_obj(client, test_pod, rate_values)
 
     log.info("Test ingress bandwidth...")
-    ingress_bw = await run_bandwidth_test(
-        ops_test, server, test_pod, namespace, kubeconfig
-    )
+    ingress_bw = await run_bandwidth_test(kubectl_exec, server, test_pod, namespace)
     assert isclose(ingress_bw, 5.0, abs_tol=0.5)
 
     log.info("Test egress bandwidth...")
     egress_bw = await run_bandwidth_test(
-        ops_test, server, test_pod, namespace, kubeconfig, reverse=True
+        kubectl_exec, server, test_pod, namespace, reverse=True
     )
     assert isclose(egress_bw, 10.0, abs_tol=0.5)
 
 
 @pytest.mark.skip
-async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
+async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     """
     TODO: This test is not working as intended
     and must be fixed.
@@ -102,15 +106,9 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     server_ip = server.status.podIP
 
     log.info("Setup iperf3 servers...")
-    iperf3_cmd = 'sh -c "iperf3 -s -p 5101 --daemon && iperf3 -s -p 5102 --daemon"'
-    cmd = (
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {server.metadata.name} -n {namespace} "
-        f"-- {iperf3_cmd}"
-    )
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-
-    assert rc == 0, f"Failed to setup iperf3 servers: {(stderr or stdout).strip()}"
+    iperf3_cmd = "iperf3 -s -p 5101 --daemon && iperf3 -s -p 5102 --daemon"
+    args = server.metadata.name, namespace, iperf3_cmd
+    await kubectl_exec(*args, fail_msg="Failed to setup iperf3 servers")
 
     new_priority_annotation = {"ovn.kubernetes.io/priority": f"{NEW_PRIORITY_HTB}"}
     await annotate_obj(client, pod_prior, new_priority_annotation)
@@ -118,30 +116,14 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     low_priority_annotation = {"ovn.kubernetes.io/priority": f"{LOW_PRIORITY_HTB}"}
     await annotate_obj(client, pod_non_prior, low_priority_annotation)
 
-    cmd = []
-    cmd.append(
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {pod_prior.metadata.name} "
-        f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} -p 5101 -JZ"'
+    results = await asyncio.gather(
+        kubectl_exec(
+            pod_prior.metadata.name, namespace, f"iperf3 -c {server_ip} -p 5101 -JZ"
+        ),
+        kubectl_exec(
+            pod_non_prior.metadata.name, namespace, f"iperf3 -c {server_ip} -p 5102 -JZ"
+        ),
     )
-    cmd.append(
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {pod_non_prior.metadata.name} "
-        f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} -p 5102 -JZ"'
-    )
-
-    processes = []
-    for c in cmd:
-        p = subprocess.Popen(shlex.split(c), stdout=subprocess.PIPE)
-        processes.append(p)
-
-    results = []
-    for p in processes:
-        p.wait()
-        out, _ = p.communicate()
-        results.append(out.decode("utf-8"))
 
     _, prior_bw = parse_iperf_result(results[0])
     _, non_prior_bw = parse_iperf_result(results[1])
@@ -149,14 +131,14 @@ async def test_linux_htb_performance(ops_test, kubeconfig, client, iperf3_pods):
     assert prior_bw > non_prior_bw
 
 
-async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
+async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
     # ping once before the test, as the first ping delay takes a bit,
     # but subsequent pings work as expected
     # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
-    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
+    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
 
     # latency is in ms
     latency = 1000
@@ -164,19 +146,19 @@ async def test_pod_netem_latency(ops_test, kubeconfig, client, iperf3_pods):
     await annotate_obj(client, pinger, latency_annotation)
 
     log.info("Testing ping latency ...")
-    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-    average_latency = parse_ping_delay(stdout)
+    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+    average_latency = avg_ping_delay(stdout)
     assert isclose(average_latency, latency, rel_tol=0.05)
 
 
-async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
+async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
     # Test loss before applying the annotation
     log.info("Testing ping loss ...")
-    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-    actual_loss = parse_ping_loss(stdout)
+    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+    actual_loss = ping_loss(stdout)
     assert actual_loss == 0
 
     # Annotate and test again
@@ -185,12 +167,12 @@ async def test_pod_netem_loss(ops_test, kubeconfig, client, iperf3_pods):
     await annotate_obj(client, pinger, loss_annotation)
 
     log.info("Testing ping loss ...")
-    stdout = await ping(ops_test, pinger, pingee, namespace, kubeconfig)
-    actual_loss = parse_ping_loss(stdout)
+    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+    actual_loss = ping_loss(stdout)
     assert actual_loss == expected_loss
 
 
-async def test_pod_netem_limit(ops_test, kubeconfig, client, iperf3_pods):
+async def test_pod_netem_limit(ops_test, client, iperf3_pods):
     expected_limit = 100
     for pod in iperf3_pods:
         # Annotate all the pods so we dont have to worry about
@@ -199,21 +181,23 @@ async def test_pod_netem_limit(ops_test, kubeconfig, client, iperf3_pods):
         await annotate_obj(client, pod, limit_annotation)
 
     log.info("Looking for kubernetes-worker/0 netem interface ...")
-    cmd = "juju run --unit kubernetes-worker/0 -- ip link"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run ip link: {(stdout or stderr).strip()}"
+    juju_cmd = "run --unit kubernetes-worker/0 -- ip link"
+    _, stdout, __ = await ops_test.juju(
+        *shlex.split(juju_cmd), fail_msg="Failed to run ip link"
+    )
 
     interface = parse_ip_link(stdout)
     log.info(f"Checking qdisk on interface {interface} for correct limit ...")
-    cmd = f"juju run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run tc qdisc show: {(stdout or stderr).strip()}"
+    juju_cmd = f"run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
+    _, stdout, __ = await ops_test.juju(
+        *shlex.split(juju_cmd), fail_msg="Failed to run tc qdisc show"
+    )
     actual_limit = parse_tc_show(stdout)
     assert actual_limit == expected_limit
 
 
 async def test_gateway_qos(
-    ops_test, kubeconfig, client, gateway_server, gateway_client_pod, worker_node
+    kubectl_exec, client, gateway_server, gateway_client_pod, worker_node
 ):
     namespace = gateway_client_pod.metadata.namespace
 
@@ -230,18 +214,17 @@ async def test_gateway_qos(
 
     log.info("Testing node-level ingress bandwidth...")
     ingress_bw = await run_external_bandwidth_test(
-        ops_test,
+        kubectl_exec,
         gateway_server,
         gateway_client_pod,
         namespace,
-        kubeconfig,
         reverse=True,
     )
     assert isclose(ingress_bw, 60, rel_tol=0.10)
 
     log.info("Testing node-level egress bandwidth...")
     egress_bw = await run_external_bandwidth_test(
-        ops_test, gateway_server, gateway_client_pod, namespace, kubeconfig
+        kubectl_exec, gateway_server, gateway_client_pod, namespace
     )
     assert isclose(egress_bw, 30, rel_tol=0.10)
 
@@ -274,33 +257,33 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
-async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
+@pytest.fixture()
+async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
     await kubectl("apply", "-f", manifest_path)
 
-    deadline = time.time() + 600
-    while True:
-        try:
-            await kubectl("exec", "test-multi-nic-ipam", "--", "apt-get", "update")
-            await kubectl(
-                "exec",
-                "test-multi-nic-ipam",
-                "--",
-                "apt-get",
-                "install",
-                "-y",
-                "iproute2",
-            )
-            ip_addr_output = await kubectl(
-                "exec", "test-multi-nic-ipam", "--", "ip", "-j", "addr"
-            )
-            break
-        except subprocess.CalledProcessError:
-            if time.time() > deadline:
-                raise
-        await asyncio.sleep(1)
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+    )
+    async def pod_ip_addr():
+        pod = "test-multi-nic-ipam"
+        await kubectl_exec(pod, "default", "apt-get update")
+        await kubectl_exec(pod, "default", "apt-get install -y iproute2")
+        return await kubectl_exec(pod, "default", "ip -j addr")
 
-    ifaces = json.loads(ip_addr_output)
+    ip_addr_output = await pod_ip_addr()
+
+    try:
+        yield ip_addr_output
+    finally:
+        await kubectl("delete", "-f", manifest_path)
+
+
+@pytest.mark.usefixtures("multus_installed")
+async def test_multi_nic_ipam(multi_nic_ipam):
+    ifaces = json.loads(multi_nic_ipam)
     iface_addrs = {
         iface["ifname"]: [
             addr for addr in iface["addr_info"] if addr["family"] == "inet"
@@ -322,10 +305,13 @@ async def test_multi_nic_ipam(kubectl, multus_installed, ops_test):
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
 
-    await kubectl("delete", "-f", manifest_path)
+
+class iPerfError(Exception):
+    pass
 
 
-def parse_iperf_result(output):
+def parse_iperf_result(output: str):
+    """Parse output from iperf3, raise iPerfError when the data isn't valid."""
     # iperf3 output looks like this:
     # {
     #   start: {...},
@@ -343,75 +329,72 @@ def parse_iperf_result(output):
     #   },
     # }
 
-    result = json.loads(output)
+    try:
+        result = json.loads(output)
+    except json.decoder.JSONDecodeError as ex:
+        raise iPerfError(f"Cannot parse iperf3 json results: '{output}'") from ex
     # Extract the average values in bps and convert into mbps.
-    sum_sent = float(result["end"]["sum_sent"]["bits_per_second"]) / 1e6
-    sum_received = float(result["end"]["sum_received"]["bits_per_second"]) / 1e6
+    iperf_error = result.get("error")
+    if iperf_error:
+        raise iPerfError(f"iperf3 encountered a runtime error: {iperf_error}")
 
-    return (sum_sent, sum_received)
+    try:
+        sum_sent = float(result["end"]["sum_sent"]["bits_per_second"]) / 1e6
+        sum_received = float(result["end"]["sum_received"]["bits_per_second"]) / 1e6
+    except KeyError as ke:
+        raise iPerfError(f"failed to find bps in result {result}") from ke
+
+    return sum_sent, sum_received
 
 
-async def run_bandwidth_test(
-    ops_test, server, client, namespace, kubeconfig, reverse=False
-):
+@retry(
+    retry=retry_if_exception_type(iPerfError),
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+)
+async def run_bandwidth_test(kubectl_exec, server, client, namespace, reverse=False):
     server_ip = server.status.podIP
 
-    log.info("Setup iperf3 server...")
+    log.info("Setup iperf3 internal bw test...")
     iperf3_cmd = "iperf3 -s -p 5101 --daemon"
-    cmd = (
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {server.metadata.name} "
-        f"-n {namespace} -- {iperf3_cmd}"
-    )
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    args = server.metadata.name, namespace, iperf3_cmd
+    stdout = await kubectl_exec(*args, fail_msg="Failed to setup iperf3 server")
 
-    assert rc == 0, f"Failed to setup iperf3 server: {(stderr or stdout).strip()}"
     reverse_flag = "-R" if reverse else ""
-    cmd = (
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {client.metadata.name} "
-        f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server_ip} {reverse_flag} -p 5101 -JZ"'
-    )
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
+    iperf3_cmd = f"iperf3 -c {server_ip} {reverse_flag} -p 5101 -JZ"
+    args = client.metadata.name, namespace, iperf3_cmd
+    stdout = await kubectl_exec(*args, fail_msg="Failed to run iperf3 test")
 
     _, sum_received = parse_iperf_result(stdout)
     return sum_received
 
 
+@retry(
+    retry=retry_if_exception_type(iPerfError),
+    stop=stop_after_attempt(3),
+    wait=wait_fixed(1),
+)
 async def run_external_bandwidth_test(
-    ops_test, server, client, namespace, kubeconfig, reverse=False
+    kubectl_exec, server, client, namespace, reverse=False
 ):
+    log.info("Setup iperf3 external bw test...")
     reverse_flag = "-R" if reverse else ""
-    cmd = (
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {client.metadata.name} "
-        f"-n {namespace} "
-        f'-- sh -c "iperf3 -c {server} {reverse_flag} -JZ"'
-    )
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run iperf3 test: {(stdout or stderr).strip()}"
-
+    iperf3_cmd = f"iperf3 -c {server} {reverse_flag} -JZ"
+    args = client.metadata.name, namespace, iperf3_cmd
+    stdout = await kubectl_exec(*args, fail_msg="Failed to run iperf3 test")
     _, sum_received = parse_iperf_result(stdout)
     return sum_received
 
 
-async def ping(ops_test, pinger, pingee, namespace, kubeconfig):
+async def ping(kubectl_exec, pinger, pingee, namespace):
     pingee_ip = pingee.status.podIP
-
-    cmd = (
-        f"kubectl --kubeconfig {kubeconfig} "
-        f"exec {pinger.metadata.name} "
-        f"-n {namespace} "
-        f'-- sh -c "ping {pingee_ip} -w 5"'
-    )
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-
+    ping_cmd = f"ping {pingee_ip} -w 5"
+    args = pinger.metadata.name, namespace, ping_cmd
+    _, stdout, __ = await kubectl_exec(*args, check=False)
     return stdout
 
 
-def parse_ping_delay(stdout):
+def _ping_parse(stdout: str, line_filter: str, regex: re.Pattern, idx: int):
     # ping output looks like this:
     # PING google.com(dfw28s31-in-x0e.1e100.net (2607:f8b0:4000:818::200e))
     # 56 data bytes
@@ -423,20 +406,21 @@ def parse_ping_delay(stdout):
     # --- google.com ping statistics ---
     # 2 packets transmitted, 2 received, 0% packet loss, time 1001ms
     # rtt min/avg/max/mdev = 50.860/284.419/517.978/233.559 ms
+    lines = [line for line in stdout.splitlines() if line_filter in line]
+    assert len(lines) == 1, f"'{line_filter}' not found in ping response: {stdout}"
+    matches = regex.findall(lines[0])
+    assert (
+        len(matches) > idx
+    ), f"'{line_filter}' not parsable in ping response: {stdout}"
+    return matches[idx]
 
-    lines = stdout.splitlines()
-    delay_line = lines[-1]
-    delay_stats = delay_line.split("=")[-1]
-    average_delay = delay_stats.split("/")[1]
-    return float(average_delay)
+
+def avg_ping_delay(stdout: str) -> float:
+    return float(_ping_parse(stdout, "min/avg/max", PING_LATENCY_RE, 1))
 
 
-def parse_ping_loss(stdout):
-    lines = stdout.splitlines()
-    loss_line = [line for line in lines if "loss" in line][0]
-    loss_stats = loss_line.split(",")[2]
-    loss_percentage = loss_stats.split("%")[0]
-    return float(loss_percentage)
+def ping_loss(stdout: str) -> float:
+    return float(_ping_parse(stdout, "packet loss", PING_LOSS_RE, 0))
 
 
 def parse_ip_link(stdout):
