@@ -63,7 +63,7 @@ async def test_kubectl_ko_plugin(ops_test):
     machines = [u.machine.entity_id for u in units]
     for m in machines:
         cmd = f"juju ssh {m} -- kubectl ko nbctl show"
-        ops_test.run(
+        await ops_test.run(
             *shlex.split(cmd),
             check=True,
             fail_msg=f"Failed to execute kubectl-ko on machine:{m}",
