@@ -16,6 +16,8 @@ from lightkube.resources.apps_v1 import DaemonSet
 from lightkube.resources.core_v1 import Pod
 from lightkube.resources.core_v1 import Namespace
 from lightkube.resources.core_v1 import Node
+from lightkube.resources.apps_v1 import Deployment
+from lightkube.resources.core_v1 import Service
 from lightkube.generic_resource import create_global_resource
 from random import choices
 from string import ascii_lowercase, digits
@@ -574,3 +576,65 @@ async def expected_prometheus_metrics():
         metrics = json.load(file)["data"]
 
     return metrics
+
+@pytest_asyncio.fixture(scope="module")
+async def nginx(client):
+    log.info("Creating Nginx deployment and service ...")
+    path = Path("tests/data/nginx.yaml")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj, namespace="default")
+
+    log.info("Waiting for Nginx deployment to be available ...")
+    client.wait(Deployment, "nginx", for_conditions=["Available"])
+    log.info("Nginx deployment is now available")
+    yield
+
+    log.info("Deleting Nginx deployment and service ...")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(type(obj), obj.metadata.name)
+
+@pytest_asyncio.fixture(scope="module")
+async def nginx_cluster_ip(client, nginx):
+    log.info("Getting Nginx service IP ...")
+    svc = client.get(Service, name="nginx", namespace="default")
+    return svc.spec.clusterIP
+
+
+@pytest_asyncio.fixture(scope="module")
+async def nginx_pods(client, nginx):
+    log.info("Getting Nginx pods ...")
+    pods = client.list(Pod, namespace="default", labels={"app": "nginx"})
+    return pods
+
+
+@pytest_asyncio.fixture(scope="module")
+async def default_subnet(client, subnet_resource):
+    log.info("Getting default subnet ...")
+    subnet = client.get(subnet_resource, name="ovn-default")
+    return subnet
+
+
+@pytest_asyncio.fixture(scope="module")
+async def bird(ops_test):
+    log.info("Deploying bird ...")
+    await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=1)
+    await ops_test.model.block_until(
+        lambda: "bird" in ops_test.model.applications,
+        timeout=60
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    log.info("Bird deployment complete")
+
+    yield
+
+    log.info("Removing Bird application ...")
+    cmd = "remove-application bird --force"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    log.info(stdout)
+    log.info(stderr)
+    assert rc == 0
+    await ops_test.model.block_until(lambda: "bird" not in ops_test.model.applications, timeout=60 * 10)
+
+

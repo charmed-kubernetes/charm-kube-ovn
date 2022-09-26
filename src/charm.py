@@ -75,7 +75,7 @@ class KubeOvnCharm(CharmBase):
         key = "command" if command else "args"
         container_args = container.setdefault(key, [])
         for k, v in args.items():
-            container_args.append(k + "=" + v)
+            container_args.append(k + "=" + str(v))
 
     def apply_crds(self):
         self.unit.status = MaintenanceStatus("Applying CRDs")
@@ -166,7 +166,7 @@ class KubeOvnCharm(CharmBase):
         kube_ovn_monitor = self.get_resource(
             resources, kind="Deployment", name="kube-ovn-monitor"
         )
-        self.replace_node_selector(kube_ovn_monitor)
+        self.replace_node_selector(kube_ovn_monitor, self.model.config["control-plane-node-label"], "kube-ovn/role")
         self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
@@ -184,7 +184,7 @@ class KubeOvnCharm(CharmBase):
         ovn_central = self.get_resource(
             resources, kind="Deployment", name="ovn-central"
         )
-        self.replace_node_selector(ovn_central)
+        self.replace_node_selector(ovn_central, self.model.config["control-plane-node-label"], "kube-ovn/role")
         self.set_replicas(ovn_central, len(node_ips))
 
         ovn_central_container = self.get_container_resource(
@@ -195,6 +195,57 @@ class KubeOvnCharm(CharmBase):
         )
 
         self.apply_manifest(resources, "ovn.yaml")
+
+    def apply_speaker(self, registry, speaker_config_element):
+        self.unit.status = MaintenanceStatus("Applying Speaker resource")
+        resources = self.load_manifest("speaker.yaml")
+        speaker = self.get_resource(
+            resources, kind="DaemonSet", name="kube-ovn-speaker"
+        )
+        speaker_container = self.get_container_resource(
+            speaker, container_name="kube-ovn-speaker"
+        )
+        self.replace_container_args(
+            speaker_container,
+            args={
+                "--neighbor-address": speaker_config_element["neighbor-address"],
+                "--neighbor-as": speaker_config_element["neighbor-as"],
+                "--cluster-as": speaker_config_element["cluster-as"],
+            },
+        )
+        self.add_container_args(
+            speaker_container,
+            args={
+                 "--announce-cluster-ip": speaker_config_element["announce-cluster-ip"],
+                 "--v": speaker_config_element["v"],
+            },
+        )
+        self.replace_images(resources, registry)
+        self.replace_node_selector(speaker, speaker_config_element["node-selector"], "ovn.kubernetes.io/bgp")
+        self.replace_name(speaker, speaker_config_element['name'])
+        self.label_bgp_nodes(speaker_config_element["node-selector"])
+        self.apply_manifest(resources, f"{speaker_config_element['name']}.speaker.yaml")
+
+    def remove_speakers(self):
+        log.info("Cleaning up any existing speakers ...")
+        rendered_dir = "templates/rendered/"
+        if os.path.isdir(rendered_dir):
+            for file in os.listdir(rendered_dir):
+                if file.endswith(".speaker.yaml"):
+                    filepath = os.path.join(rendered_dir, file)
+                    log.info(f"Removing {filepath}")
+                    if self.unit.is_leader():
+                        # Only need to delete the daemonset once, let the leader do it
+                        try:
+                            self.kubectl("delete", "-f", filepath)
+                        except CalledProcessError as e:
+                            log.error(f"Error removing speaker daemonset defined in {filepath}: {e}")
+                    try:
+                        os.remove(filepath)
+                    except FileNotFoundError as e:
+                        log.error(f"Error deleting rendered yaml {filepath}: {e}")
+
+        self.unlabel_bgp_nodes()
 
     def check_if_pod_restart_will_be_needed(self):
         output = self.kubectl(
@@ -241,12 +292,31 @@ class KubeOvnCharm(CharmBase):
                 self.restart_pods()
         except CalledProcessError:
             # Likely the Kubernetes API is unavailable. Log the exception in
-            # case it it something else, and let the caller know we failed.
+            # case it is something else, and let the caller know we failed.
             log.error(traceback.format_exc())
             self.unit.status = WaitingStatus("Waiting to retry configuring Kube-OVN")
             return
 
         self.stored.kube_ovn_configured = True
+
+    def configure_speakers(self):
+        registry = self.get_registry()
+        if not self.is_kubeconfig_available() or not registry:
+            self.unit.status = WaitingStatus("Waiting for CNI relation")
+            return
+
+        try:
+            self.remove_speakers()
+            if self.model.config["bgp-speakers"]:
+                speaker_config_list = list(yaml.safe_load(self.model.config["bgp-speakers"]))
+                for speaker_config in speaker_config_list:
+                    self.apply_speaker(registry, speaker_config)
+        except CalledProcessError:
+            # Likely the Kubernetes API is unavailable. Log the exception in
+            # case is something else, and let the caller know we failed.
+            log.error(traceback.format_exc())
+            self.unit.status = WaitingStatus("Waiting to retry configuring speakers")
+            return
 
     def get_registry(self):
         registry = self.model.config["image-registry"]
@@ -365,6 +435,7 @@ class KubeOvnCharm(CharmBase):
     def on_config_changed(self, event):
         self.configure_cni_relation()
         self.configure_kube_ovn()
+        self.configure_speakers()
         self.install_kubectl_plugin("kubectl-ko")
         self.set_active_status()
 
@@ -460,12 +531,12 @@ class KubeOvnCharm(CharmBase):
             key = arg.split("=")[0]
             value = args.get(key)
             if value is not None:  # allow for non-truthy values
-                container_command[i] = key + "=" + value
+                container_command[i] = key + "=" + str(value)
         for i, arg in enumerate(container_args):
             key = arg.split("=")[0]
             value = args.get(key)
             if value is not None:  # allow for non-truthy values
-                container_args[i] = key + "=" + value
+                container_args[i] = key + "=" + str(value)
 
     def replace_container_env_vars(self, container, env_vars):
         for env_var in container["env"]:
@@ -484,13 +555,31 @@ class KubeOvnCharm(CharmBase):
                             [registry] + container["image"].split("/")[-2:]
                         )
 
-    def replace_node_selector(self, resource):
-        label = self.model.config["control-plane-node-label"]
-        label_key, label_value = label.split("=")
+    def replace_node_selector(self, resource, new_label, key_to_replace):
+        label_key, label_value = new_label.split("=")
 
         node_selector = resource["spec"]["template"]["spec"]["nodeSelector"]
-        del node_selector["kube-ovn/role"]
+        del node_selector[key_to_replace]
         node_selector[label_key] = label_value
+
+    def replace_name(self, resource, new_name):
+        resource["metadata"]["name"] = new_name
+
+    def label_bgp_nodes(self, node_selector):
+        label_key, label_value = node_selector.split("=")
+        nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
+        for node in nodes:
+            if node["metadata"]["labels"].get(label_key) == label_value:
+                log.info(f"Labeling node {node['metadata']['name']} with ovn.kubernetes.io/bgp=true")
+                self.kubectl("label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp=true")
+
+
+    def unlabel_bgp_nodes(self):
+        nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
+        for node in nodes:
+            if node["metadata"]["labels"].get("ovn.kubernetes.io/bgp"):
+                log.info(f"Removing ovn.kubernetes.io/bgp label from node {node['metadata']['name']}")
+                self.kubectl("label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp-")
 
     def restart_pods(self):
         self.unit.status = MaintenanceStatus("Restarting pods")

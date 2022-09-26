@@ -8,7 +8,10 @@ import shlex
 import pytest
 import logging
 import json
+import yaml
+import time
 import re
+from lightkube.types import PatchType
 
 from ipaddress import ip_address, ip_network
 from tenacity import (
@@ -304,6 +307,89 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert len(iface_addrs["net1"]) == 1
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
+
+
+async def test_bgp(nginx_cluster_ip, bird, ops_test, nginx_pods, default_subnet, client, kubectl):
+    # TODO: Refactor annotations and such into fixtures so that setup/teardown is clean
+    # configure kube-ovn to peer with bird
+    bird_app = ops_test.model.applications['bird']
+    kube_ovn_app = ops_test.model.applications['kube-ovn']
+    worker_app = ops_test.model.applications['kubernetes-worker']
+    await kube_ovn_app.set_config({
+        'bgp-speakers': yaml.dump([
+            {'name': f'test-speaker-{unit.name.replace("/", "-")}', 'node-selector': "juju-application=kubernetes-worker",
+             'neighbor-address': unit.public_address, "neighbor-as": 64512, "cluster-as": 64512,
+             "announce-cluster-ip": True, "v": 5}
+            for unit in bird_app.units
+        ])
+    })
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    # Annotate pods and default subnet
+    for nginx_pod in nginx_pods:
+        await annotate_obj(client, nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
+
+    # For some reason lightkube is having trouble annotating the subnet CRD, so using kubectl instead
+    shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true'
+    log.info("Annotating subnet with bgp=true")
+    await kubectl(*shlex.split(shcmd))
+
+    # Set natOutgoing to false on the default subnet
+    patch = {'spec': {'natOutgoing': False}}
+    client.patch(type(default_subnet), name='ovn-default', obj=patch, patch_type=PatchType.MERGE)
+
+    # configure bird to peer with kube-ovn
+    await bird_app.set_config({
+        'bgp-peers': yaml.dump([
+            {'address': unit.public_address, 'as-number': 64512}
+            for unit in worker_app.units
+        ])
+    })
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    # verify test service is reachable from bird
+    log.info("Verifying pods are reachable from bird ...")
+    deadline = time.time() + 60 * 10
+    # TODO: Use tenacity here instead so things are cleaner
+    while time.time() < deadline:
+        retcode, stdout, stderr = await ops_test.run(
+            'juju', 'ssh', '-m', ops_test.model_full_name, 'bird/leader',
+            'curl', '--connect-timeout', '10', nginx_cluster_ip
+        )
+        if retcode == 0:
+            break
+    else:
+        # clean up
+        log.info("Setting empty bgp-speakers config ...")
+        await kube_ovn_app.set_config({
+            'bgp-speakers': '',
+        })
+        for nginx_pod in nginx_pods:
+            await annotate_obj(client, nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
+        shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp-'
+        await kubectl(*shlex.split(shcmd))
+
+        # Set natOutgoing to true on the default subnet
+        patch = {'spec': {'natOutgoing': True}}
+        client.patch(type(default_subnet), name='ovn-default', obj=patch, patch_type=PatchType.MERGE)
+        pytest.fail("Failed service connection test after BGP config")
+
+    # TODO: Test pod level routing
+
+    # clean up
+    log.info("Setting empty bgp-speakers config ...")
+    for nginx_pod in nginx_pods:
+        await annotate_obj(client, nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
+    shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp-'
+    await kubectl(*shlex.split(shcmd))
+
+    # Set natOutgoing to true on the default subnet
+    patch = {'spec': {'natOutgoing': True}}
+    client.patch(type(default_subnet), name='ovn-default', obj=patch, patch_type=PatchType.MERGE)
+
+    await kube_ovn_app.set_config({
+        'bgp-speakers': '',
+    })
 
 
 class iPerfError(Exception):

@@ -8,6 +8,7 @@ import unittest.mock as mock
 from pathlib import Path
 from contextlib import ExitStack as does_not_raise
 import json
+import yaml
 import pytest
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
@@ -51,13 +52,17 @@ def test_kubectl(mock_check_output, charm):
     )
 
 
-@mock.patch("charm.KubeOvnCharm.configure_cni_relation", mock.MagicMock())
+@mock.patch("charm.KubeOvnCharm.configure_cni_relation")
 @mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
-def test_config_change(configure_kube_ovn, charm, harness):
+@mock.patch("charm.KubeOvnCharm.configure_speakers")
+def test_config_change(configure_speakers, configure_kube_ovn, configure_cni_relation, charm, harness):
     configure_kube_ovn.return_value = True
     charm.stored.kube_ovn_configured = True
     config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
     harness.update_config(config_dict)
+    configure_cni_relation.assert_called_once()
+    configure_kube_ovn.assert_called_once()
+    configure_speakers.assert_called_once()
     assert charm.unit.status == ActiveStatus()
 
 
@@ -107,13 +112,11 @@ def test_restart_pods(charm, kubectl):
 
 
 def test_replace_node_selector(harness, charm):
-    harness.disable_hooks()
     config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
-    harness.update_config(config_dict)
     resource = dict(
         spec=dict(template=dict(spec=dict(nodeSelector={"kube-ovn/role": "deleteMe"})))
     )
-    charm.replace_node_selector(resource)
+    charm.replace_node_selector(resource, config_dict["control-plane-node-label"], "kube-ovn/role")
     assert "juju-charm" in resource["spec"]["template"]["spec"]["nodeSelector"]
     assert "kube-ovn/role" not in resource["spec"]["template"]["spec"]["nodeSelector"]
 
@@ -580,7 +583,8 @@ def test_apply_kube_ovn(
         )
     )
 
-    replace_node_selector.assert_called_once_with(kube_ovn_monitor)
+    replace_node_selector.assert_called_once_with(kube_ovn_monitor, harness.charm.config["control-plane-node-label"],
+                                                  "kube-ovn/role")
     assert kube_ovn_monitor["spec"]["replicas"] == len(node_ips)
 
     apply_manifest.assert_called_once_with(resources, "kube-ovn.yaml")
@@ -604,6 +608,7 @@ def test_apply_ovn(
     get_ovn_node_ips,
     load_manifest,
     charm,
+    harness
 ):
     node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
     ovn_central = get_resource.return_value = dict(spec=dict(replicas=None))
@@ -621,7 +626,8 @@ def test_apply_ovn(
         resources, kind="Deployment", name="ovn-central"
     )
 
-    replace_node_selector.assert_called_once_with(ovn_central)
+    replace_node_selector.assert_called_once_with(ovn_central, harness.charm.config["control-plane-node-label"],
+                                                  "kube-ovn/role")
     assert ovn_central["spec"]["replicas"] == len(node_ips)
 
     get_container_resource.assert_called_once_with(
@@ -966,3 +972,192 @@ def test_patch_prometheus_resources(mock_render, charm, kubectl, remove):
         for res in test_resources
     ]
     kubectl.assert_has_calls(kubectl_calls)
+
+
+@mock.patch("charm.KubeOvnCharm.load_manifest")
+@mock.patch("charm.KubeOvnCharm.get_resource")
+@mock.patch("charm.KubeOvnCharm.get_container_resource")
+@mock.patch("charm.KubeOvnCharm.replace_images")
+@mock.patch("charm.KubeOvnCharm.replace_node_selector")
+@mock.patch("charm.KubeOvnCharm.replace_name")
+@mock.patch("charm.KubeOvnCharm.add_container_args")
+@mock.patch("charm.KubeOvnCharm.replace_container_args")
+@mock.patch("charm.KubeOvnCharm.label_bgp_nodes")
+@mock.patch("charm.KubeOvnCharm.apply_manifest")
+def test_apply_speaker(
+    apply_manifest,
+    label_bgp_nodes,
+    replace_container_args,
+    add_container_args,
+    replace_name,
+    replace_node_selector,
+    replace_images,
+    get_container_resource,
+    get_resource,
+    load_manifest,
+    charm,
+):
+    # Setup
+    speaker_yaml = """- name: my-speaker
+  node-selector: juju-application=kubernetes-worker
+  neighbor-address: '10.32.32.1'
+  neighbor-as: 65030
+  cluster-as: 65000
+  announce-cluster-ip: true
+  v: 2"""
+    speaker_config_list = list(yaml.safe_load(speaker_yaml))
+    (
+        kube_ovn_speaker,
+
+    ) = get_resource.side_effect = [
+        mock.MagicMock(),
+    ]
+
+    (
+        kube_ovn_speaker_container,
+    ) = get_container_resource.side_effect = [
+        mock.MagicMock(),
+    ]
+
+    # Test Method
+    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, speaker_config_list[0])
+
+    # Assert Correct Behavior
+    assert charm.unit.status == MaintenanceStatus("Applying Speaker resource")
+
+    load_manifest.assert_called_once_with("speaker.yaml")
+    resources = load_manifest.return_value
+    replace_images.assert_called_once_with(resources, DEFAULT_IMAGE_REGISTRY)
+    get_resource.assert_called_once_with(resources, kind="DaemonSet", name="kube-ovn-speaker")
+
+    get_container_resource.assert_called_once_with(kube_ovn_speaker, container_name="kube-ovn-speaker")
+
+    replace_container_args.assert_called_once_with(
+                kube_ovn_speaker_container,
+                args={
+                    "--neighbor-address": "10.32.32.1",
+                    "--neighbor-as": 65030,
+                    "--cluster-as": 65000,
+                },
+            )
+
+    add_container_args.assert_called_once_with(
+        kube_ovn_speaker_container,
+        args={
+            "--announce-cluster-ip": True,
+            "--v": 2,
+        },
+    )
+
+    replace_node_selector.assert_called_once_with(kube_ovn_speaker, "juju-application=kubernetes-worker",
+                                                  "ovn.kubernetes.io/bgp")
+    replace_name.assert_called_once_with(kube_ovn_speaker, "my-speaker")
+    label_bgp_nodes.assert_called_once_with("juju-application=kubernetes-worker")
+    apply_manifest.assert_called_once_with(resources, "my-speaker.speaker.yaml")
+
+
+@mock.patch("charm.KubeOvnCharm.get_registry")
+@mock.patch("charm.KubeOvnCharm.apply_speaker")
+@mock.patch("charm.KubeOvnCharm.remove_speakers")
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available")
+def test_configure_speakers(is_kubeconfig_available, remove_speakers, apply_speaker, get_registry, charm, harness):
+    # Setup
+    is_kubeconfig_available.return_value = True
+    get_registry.return_value = DEFAULT_IMAGE_REGISTRY
+    get_registry.return_value = DEFAULT_IMAGE_REGISTRY
+    harness.disable_hooks()
+    config_dict = {
+        "bgp-speakers": """- name: my-speaker
+  node-selector: juju-application=kubernetes-worker
+  neighbor-address: '10.32.32.1'
+  neighbor-as: 65030
+  cluster-as: 65000
+  announce-cluster-ip: true
+  v: 2""",
+    }
+    harness.update_config(config_dict)
+    charm.configure_speakers()
+    remove_speakers.assert_called_once()
+    apply_speaker.assert_called_once_with(DEFAULT_IMAGE_REGISTRY,  {
+        'name': 'my-speaker', 'node-selector': 'juju-application=kubernetes-worker', 'neighbor-address': '10.32.32.1',
+        'neighbor-as': 65030, 'cluster-as': 65000, 'announce-cluster-ip': True, 'v': 2})
+
+    # Try with empty config option
+    apply_speaker.reset_mock()
+    harness.disable_hooks()
+    config_dict = {
+        "bgp-speakers": "",
+    }
+    harness.update_config(config_dict)
+    charm.configure_speakers()
+    apply_speaker.assert_not_called()
+
+    # Try without kubeconfig being available
+    is_kubeconfig_available.return_value = False
+    charm.configure_speakers()
+    assert charm.unit.status == WaitingStatus("Waiting for CNI relation")
+
+
+@pytest.mark.parametrize("leader", [True, False])
+@mock.patch("charm.os.path.isdir")
+@mock.patch("charm.os.listdir")
+@mock.patch("charm.os.remove")
+def test_remove_speakers(remove, listdir, isdir, kubectl, unlabel_bgp_nodes, harness, leader):
+    harness.set_leader(leader)
+    harness.begin()
+    listdir.return_value = ["somefile.yaml", "one.speaker.yaml", "two.speaker.yaml", "otherfile.yaml"]
+    isdir.return_value = True
+    unlabel_bgp_nodes.reset_mock()
+    harness.charm.remove_speakers()
+    if leader:
+        assert len(kubectl.call_args_list) == 2
+        kubectl.assert_has_calls(
+            [
+                mock.call(harness.charm, "delete", "-f", "templates/rendered/one.speaker.yaml"),
+                mock.call(harness.charm, "delete", "-f", "templates/rendered/two.speaker.yaml"),
+            ]
+        )
+    else:
+        kubectl.assert_not_called()
+
+    remove.assert_has_calls(
+        [
+            mock.call("templates/rendered/one.speaker.yaml"),
+            mock.call("templates/rendered/two.speaker.yaml"),
+        ]
+    )
+
+    unlabel_bgp_nodes.assert_called_once()
+
+
+def test_label_bgp_nodes(charm, kubectl):
+    kubectl.side_effect = [
+        '{"items": [{"metadata": {"name": "the-node", "labels": {"juju-application": "kubernetes-worker"}}}, {"metadata": {"name": "other-node", "labels": {"some-label": "some-value"}}}]}',
+        ""
+    ]
+    charm.label_bgp_nodes("juju-application=kubernetes-worker")
+    assert len(kubectl.call_args_list) == 2
+    kubectl.assert_has_calls(
+        [
+            mock.call(charm, "get", "nodes", "-o", "json"),
+            mock.call(charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp=true"),
+        ]
+    )
+
+
+@pytest.mark.skip_unlabel_bgp_nodes_mock
+def test_unlabel_bgp_nodes(kubectl, harness):
+    harness.disable_hooks()
+    harness.begin()
+    kubectl.side_effect = [
+        '{"items": [{"metadata": {"name": "the-node", "labels": {"ovn.kubernetes.io/bgp": "true"}}}, {"metadata": {"name": "other-node", "labels": {"some-label": "some-value"}}}]}',
+        ""
+    ]
+    harness.charm.unlabel_bgp_nodes()
+    assert len(kubectl.call_args_list) == 2
+    kubectl.assert_has_calls(
+        [
+            mock.call(harness.charm, "get", "nodes", "-o", "json"),
+            mock.call(harness.charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp-"),
+        ]
+    )
