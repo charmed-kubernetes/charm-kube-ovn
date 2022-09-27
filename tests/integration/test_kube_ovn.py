@@ -76,7 +76,7 @@ async def test_kubectl_ko_plugin(ops_test):
         )
 
 
-async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
+async def test_pod_network_limits(kubectl_exec, client, iperf3_pods, annotate):
     server, test_pod, _ = iperf3_pods
     namespace = server.metadata.namespace
 
@@ -84,7 +84,7 @@ async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
         "ovn.kubernetes.io/ingress_rate": "10",
         "ovn.kubernetes.io/egress_rate": "5",
     }
-    await annotate_obj(client, test_pod, rate_values)
+    annotate(test_pod, rate_values)
 
     log.info("Test ingress bandwidth...")
     ingress_bw = await run_bandwidth_test(kubectl_exec, server, test_pod, namespace)
@@ -98,7 +98,7 @@ async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
 
 
 @pytest.mark.skip
-async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
+async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods, annotate):
     """
     TODO: This test is not working as intended
     and must be fixed.
@@ -114,10 +114,10 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     await kubectl_exec(*args, fail_msg="Failed to setup iperf3 servers")
 
     new_priority_annotation = {"ovn.kubernetes.io/priority": f"{NEW_PRIORITY_HTB}"}
-    await annotate_obj(client, pod_prior, new_priority_annotation)
+    annotate(pod_prior, new_priority_annotation)
 
     low_priority_annotation = {"ovn.kubernetes.io/priority": f"{LOW_PRIORITY_HTB}"}
-    await annotate_obj(client, pod_non_prior, low_priority_annotation)
+    annotate(pod_non_prior, low_priority_annotation)
 
     results = await asyncio.gather(
         kubectl_exec(
@@ -134,7 +134,7 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     assert prior_bw > non_prior_bw
 
 
-async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
+async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -146,7 +146,7 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
     # latency is in ms
     latency = 1000
     latency_annotation = {"ovn.kubernetes.io/latency": f"{latency}"}
-    await annotate_obj(client, pinger, latency_annotation)
+    annotate(pinger, latency_annotation)
 
     log.info("Testing ping latency ...")
     stdout = await ping(kubectl_exec, pinger, pingee, namespace)
@@ -154,7 +154,7 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
     assert isclose(average_latency, latency, rel_tol=0.05)
 
 
-async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
+async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods, annotate):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -167,7 +167,7 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     # Annotate and test again
     expected_loss = 100
     loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
-    await annotate_obj(client, pinger, loss_annotation)
+    annotate(pinger, loss_annotation)
 
     log.info("Testing ping loss ...")
     stdout = await ping(kubectl_exec, pinger, pingee, namespace)
@@ -175,13 +175,13 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     assert actual_loss == expected_loss
 
 
-async def test_pod_netem_limit(ops_test, client, iperf3_pods):
+async def test_pod_netem_limit(ops_test, client, iperf3_pods, annotate):
     expected_limit = 100
     for pod in iperf3_pods:
         # Annotate all the pods so we dont have to worry about
         # which worker node we pick to check the qdisk
         limit_annotation = {"ovn.kubernetes.io/limit": f"{expected_limit}"}
-        await annotate_obj(client, pod, limit_annotation)
+        annotate(pod, limit_annotation)
 
     log.info("Looking for kubernetes-worker/0 netem interface ...")
     juju_cmd = "run --unit kubernetes-worker/0 -- ip link"
@@ -200,7 +200,7 @@ async def test_pod_netem_limit(ops_test, client, iperf3_pods):
 
 
 async def test_gateway_qos(
-    kubectl_exec, client, gateway_server, gateway_client_pod, worker_node
+    kubectl_exec, client, gateway_server, gateway_client_pod, worker_node, annotate
 ):
     namespace = gateway_client_pod.metadata.namespace
 
@@ -209,7 +209,7 @@ async def test_gateway_qos(
         "ovn.kubernetes.io/egress_rate": "30",
     }
 
-    await annotate_obj(client, worker_node, rate_annotations)
+    annotate(worker_node, rate_annotations)
 
     # We need to wait a little bit for OVN to do its thing
     # after applying the annotations
@@ -309,46 +309,40 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
 
 
-async def test_bgp(nginx_cluster_ip, bird, ops_test, nginx_pods, default_subnet, client, kubectl):
-    # TODO: Refactor annotations and such into fixtures so that setup/teardown is clean
-    # configure kube-ovn to peer with bird
-    bird_app = ops_test.model.applications['bird']
-    kube_ovn_app = ops_test.model.applications['kube-ovn']
-    worker_app = ops_test.model.applications['kubernetes-worker']
-    await kube_ovn_app.set_config({
-        'bgp-speakers': yaml.dump([
-            {'name': f'test-speaker-{unit.name.replace("/", "-")}', 'node-selector': "juju-application=kubernetes-worker",
-             'neighbor-address': unit.public_address, "neighbor-as": 64512, "cluster-as": 64512,
-             "announce-cluster-ip": True, "v": 5}
-            for unit in bird_app.units
-        ])
-    })
-    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
-
-    # Annotate pods and default subnet
-    for nginx_pod in nginx_pods:
-        await annotate_obj(client, nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
-
-    # For some reason lightkube is having trouble annotating the subnet CRD, so using kubectl instead
-    shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true'
-    log.info("Annotating subnet with bgp=true")
-    await kubectl(*shlex.split(shcmd))
-
-    # Set natOutgoing to false on the default subnet
-    patch = {'spec': {'natOutgoing': False}}
-    client.patch(type(default_subnet), name='ovn-default', obj=patch, patch_type=PatchType.MERGE)
-
-    # configure bird to peer with kube-ovn
-    await bird_app.set_config({
-        'bgp-peers': yaml.dump([
-            {'address': unit.public_address, 'as-number': 64512}
-            for unit in worker_app.units
-        ])
-    })
-    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
-
-    # verify test service is reachable from bird
+async def test_bgp_pods(bird, ops_test, annotated_nginx_pods):
     log.info("Verifying pods are reachable from bird ...")
+    deadline = time.time() + 60 * 10
+    # TODO: Use tenacity here instead so things are cleaner
+    for pod in annotated_nginx_pods:
+        while time.time() < deadline:
+            retcode, stdout, stderr = await ops_test.run(
+                'juju', 'ssh', '-m', ops_test.model_full_name, 'bird/leader',
+                'curl', '--connect-timeout', '10', pod.status.podIP
+            )
+            if retcode == 0:
+                break
+        else:
+            pytest.fail("Failed pod connection test")
+
+
+async def test_bgp_subnet(bird, ops_test, annotated_subnet_nginx_pods):
+    log.info("Verifying pods are reachable from bird via exposed subnet ...")
+    deadline = time.time() + 60 * 10
+    # TODO: Use tenacity here instead so things are cleaner
+    for pod in annotated_subnet_nginx_pods:
+        while time.time() < deadline:
+            retcode, stdout, stderr = await ops_test.run(
+                'juju', 'ssh', '-m', ops_test.model_full_name, 'bird/leader',
+                'curl', '--connect-timeout', '10', pod.status.podIP
+            )
+            if retcode == 0:
+                break
+        else:
+            pytest.fail("Failed subnet connection test")
+
+
+async def test_bgp_service(nginx_cluster_ip, bird, ops_test):
+    log.info("Verifying service is reachable from bird ...")
     deadline = time.time() + 60 * 10
     # TODO: Use tenacity here instead so things are cleaner
     while time.time() < deadline:
@@ -359,38 +353,9 @@ async def test_bgp(nginx_cluster_ip, bird, ops_test, nginx_pods, default_subnet,
         if retcode == 0:
             break
     else:
-        # clean up
-        log.info("Setting empty bgp-speakers config ...")
-        await kube_ovn_app.set_config({
-            'bgp-speakers': '',
-        })
-        for nginx_pod in nginx_pods:
-            await annotate_obj(client, nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
-        shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp-'
-        await kubectl(*shlex.split(shcmd))
+        pytest.fail("Failed service connection test")
 
-        # Set natOutgoing to true on the default subnet
-        patch = {'spec': {'natOutgoing': True}}
-        client.patch(type(default_subnet), name='ovn-default', obj=patch, patch_type=PatchType.MERGE)
-        pytest.fail("Failed service connection test after BGP config")
-
-    # TODO: Test pod level routing
-
-    # clean up
-    log.info("Setting empty bgp-speakers config ...")
-    for nginx_pod in nginx_pods:
-        await annotate_obj(client, nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
-    shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp-'
-    await kubectl(*shlex.split(shcmd))
-
-    # Set natOutgoing to true on the default subnet
-    patch = {'spec': {'natOutgoing': True}}
-    client.patch(type(default_subnet), name='ovn-default', obj=patch, patch_type=PatchType.MERGE)
-
-    await kube_ovn_app.set_config({
-        'bgp-speakers': '',
-    })
-
+# TODO: Test multi-speaker deployment
 
 class iPerfError(Exception):
     pass
@@ -539,9 +504,9 @@ def parse_tc_show(stdout):
     return int(limit_value)
 
 
-async def annotate_obj(client, obj, annotation_dict):
+async def annotate_obj(client, obj, annotation_dict, patch_type=PatchType.STRATEGIC):
     log.info(f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ...")
     obj.metadata.annotations = annotation_dict
     client.patch(
-        type(obj), obj.metadata.name, obj, namespace=obj.metadata.namespace, force=True
+        type(obj), obj.metadata.name, obj, namespace=obj.metadata.namespace, force=True, patch_type=patch_type
     )

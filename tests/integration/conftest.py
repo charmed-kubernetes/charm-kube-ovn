@@ -19,6 +19,7 @@ from lightkube.resources.core_v1 import Node
 from lightkube.resources.apps_v1 import Deployment
 from lightkube.resources.core_v1 import Service
 from lightkube.generic_resource import create_global_resource
+from lightkube.types import PatchType
 from random import choices
 from string import ascii_lowercase, digits
 from typing import Union, Tuple
@@ -604,21 +605,22 @@ async def nginx_cluster_ip(client, nginx):
 
 @pytest_asyncio.fixture(scope="module")
 async def nginx_pods(client, nginx):
-    log.info("Getting Nginx pods ...")
-    pods = client.list(Pod, namespace="default", labels={"app": "nginx"})
-    return pods
+    def f():
+        pods = client.list(Pod, namespace="default", labels={"app": "nginx"})
+        return pods
+    return f
+
+
+@pytest.fixture()
+def default_subnet(client, subnet_resource):
+    def f():
+        subnet = client.get(subnet_resource, name="ovn-default")
+        return subnet
+    return f
 
 
 @pytest_asyncio.fixture(scope="module")
-async def default_subnet(client, subnet_resource):
-    log.info("Getting default subnet ...")
-    subnet = client.get(subnet_resource, name="ovn-default")
-    return subnet
-
-
-@pytest_asyncio.fixture(scope="module")
-async def bird(ops_test):
-    log.info("Deploying bird ...")
+async def bird(ops_test, client):
     await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=1)
     await ops_test.model.block_until(
         lambda: "bird" in ops_test.model.applications,
@@ -627,9 +629,38 @@ async def bird(ops_test):
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
     log.info("Bird deployment complete")
 
+    bird_app = ops_test.model.applications['bird']
+    kube_ovn_app = ops_test.model.applications['kube-ovn']
+    worker_app = ops_test.model.applications['kubernetes-worker']
+    # configure kube-ovn to peer with bird
+    await kube_ovn_app.set_config({
+        'bgp-speakers': yaml.dump([
+            {'name': f'test-speaker-{unit.name.replace("/", "-")}',
+             'node-selector': "juju-application=kubernetes-worker",
+             'neighbor-address': unit.public_address, 'neighbor-as': 64512, 'cluster-as': 64512,
+             'announce-cluster-ip': True, 'v': 5}
+            for unit in bird_app.units
+        ])
+    })
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    # configure bird to peer with kube-ovn
+    await bird_app.set_config({
+        'bgp-peers': yaml.dump([
+            {'address': unit.public_address, 'as-number': 64512}
+            for unit in worker_app.units
+        ])
+    })
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
     yield
 
-    log.info("Removing Bird application ...")
+    log.info("Setting empty bgp-speakers config ...")
+    await kube_ovn_app.set_config({
+        'bgp-speakers': '',
+    })
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
     cmd = "remove-application bird --force"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     log.info(stdout)
@@ -637,4 +668,39 @@ async def bird(ops_test):
     assert rc == 0
     await ops_test.model.block_until(lambda: "bird" not in ops_test.model.applications, timeout=60 * 10)
 
+
+@pytest.fixture()
+def annotated_nginx_pods(nginx_pods, annotate, default_subnet, client):
+    for nginx_pod in nginx_pods():
+        annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
+
+    yield nginx_pods()
+
+    for nginx_pod in nginx_pods():
+        annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
+
+
+@pytest_asyncio.fixture()
+async def annotated_subnet_nginx_pods(nginx_pods, default_subnet, client, kubectl):
+    # For some reason lightkube is having trouble annotating the custom subnet resource, so using kubectl instead
+    # Lightkube doesn't fail, it just doesn't seem to apply the annotation
+    shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true'
+    log.info("Annotating default subnet with ovn.kubernetes.io/bgp=true ...")
+    await kubectl(*shlex.split(shcmd))
+    yield nginx_pods()
+
+    log.info("Removing ovn.kubernetes.io/bgp annotation from default subnet ...")
+    shcmd = 'annotate subnet ovn-default ovn.kubernetes.io/bgp- --overwrite=true'
+    await kubectl(*shlex.split(shcmd))
+
+
+@pytest.fixture(scope="module")
+def annotate(client, ops_test):
+    def f(obj, annotation_dict, patch_type=PatchType.STRATEGIC):
+        log.info(f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ...")
+        obj.metadata.annotations = annotation_dict
+        client.patch(
+            type(obj), obj.metadata.name, obj, namespace=obj.metadata.namespace, patch_type=patch_type
+        )
+    return f
 

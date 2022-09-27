@@ -216,8 +216,8 @@ class KubeOvnCharm(CharmBase):
         self.add_container_args(
             speaker_container,
             args={
-                 "--announce-cluster-ip": speaker_config_element["announce-cluster-ip"],
-                 "--v": speaker_config_element["v"],
+                 "--announce-cluster-ip": speaker_config_element.get("announce-cluster-ip", False),
+                 "--v": speaker_config_element.get("log-level", 2),
             },
         )
         self.replace_images(resources, registry)
@@ -284,12 +284,15 @@ class KubeOvnCharm(CharmBase):
             self.apply_crds()
             self.apply_ovn(registry)
             self.apply_kube_ovn(service_cidr, registry)
+            self.apply_speakers(registry)
 
             if self.stored.pod_restart_needed:
                 self.wait_for_ovn_central()
                 self.wait_for_kube_ovn_controller()
                 self.wait_for_kube_ovn_cni()
+                self.wait_for_speakers()
                 self.restart_pods()
+
         except CalledProcessError:
             # Likely the Kubernetes API is unavailable. Log the exception in
             # case it is something else, and let the caller know we failed.
@@ -299,24 +302,12 @@ class KubeOvnCharm(CharmBase):
 
         self.stored.kube_ovn_configured = True
 
-    def configure_speakers(self):
-        registry = self.get_registry()
-        if not self.is_kubeconfig_available() or not registry:
-            self.unit.status = WaitingStatus("Waiting for CNI relation")
-            return
-
-        try:
-            self.remove_speakers()
-            if self.model.config["bgp-speakers"]:
-                speaker_config_list = list(yaml.safe_load(self.model.config["bgp-speakers"]))
-                for speaker_config in speaker_config_list:
-                    self.apply_speaker(registry, speaker_config)
-        except CalledProcessError:
-            # Likely the Kubernetes API is unavailable. Log the exception in
-            # case is something else, and let the caller know we failed.
-            log.error(traceback.format_exc())
-            self.unit.status = WaitingStatus("Waiting to retry configuring speakers")
-            return
+    def apply_speakers(self, registry):
+        self.remove_speakers()
+        if self.model.config["bgp-speakers"]:
+            speaker_config_list = list(yaml.safe_load(self.model.config["bgp-speakers"]))
+            for speaker_config in speaker_config_list:
+                self.apply_speaker(registry, speaker_config)
 
     def get_registry(self):
         registry = self.model.config["image-registry"]
@@ -435,7 +426,6 @@ class KubeOvnCharm(CharmBase):
     def on_config_changed(self, event):
         self.configure_cni_relation()
         self.configure_kube_ovn()
-        self.configure_speakers()
         self.install_kubectl_plugin("kubectl-ko")
         self.set_active_status()
 
@@ -573,7 +563,6 @@ class KubeOvnCharm(CharmBase):
                 log.info(f"Labeling node {node['metadata']['name']} with ovn.kubernetes.io/bgp=true")
                 self.kubectl("label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp=true")
 
-
     def unlabel_bgp_nodes(self):
         nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
         for node in nodes:
@@ -627,6 +616,14 @@ class KubeOvnCharm(CharmBase):
     def wait_for_ovn_central(self):
         self.unit.status = WaitingStatus("Waiting for ovn-central")
         self.wait_for_rollout("deployment/ovn-central")
+
+    def wait_for_speakers(self):
+        if self.model.config["bgp-speakers"]:
+            speaker_config_list = list(yaml.safe_load(self.model.config["bgp-speakers"]))
+            for speaker_config in speaker_config_list:
+                speaker_name = speaker_config["name"]
+                self.unit.status = WaitingStatus(f"Waiting for speaker {speaker_name}")
+                self.wait_for_rollout(f"deployment/{speaker_name}")
 
     def wait_for_rollout(self, name, namespace="kube-system", timeout=1):
         self.kubectl(

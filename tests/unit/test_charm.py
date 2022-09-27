@@ -54,15 +54,13 @@ def test_kubectl(mock_check_output, charm):
 
 @mock.patch("charm.KubeOvnCharm.configure_cni_relation")
 @mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
-@mock.patch("charm.KubeOvnCharm.configure_speakers")
-def test_config_change(configure_speakers, configure_kube_ovn, configure_cni_relation, charm, harness):
+def test_config_change(configure_kube_ovn, configure_cni_relation, charm, harness):
     configure_kube_ovn.return_value = True
     charm.stored.kube_ovn_configured = True
     config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
     harness.update_config(config_dict)
     configure_cni_relation.assert_called_once()
     configure_kube_ovn.assert_called_once()
-    configure_speakers.assert_called_once()
     assert charm.unit.status == ActiveStatus()
 
 
@@ -315,6 +313,31 @@ def test_wait_for(kubectl, charm, name, resource):
         "-n",
         "kube-system",
         resource_name,
+        "--timeout",
+        "1s",
+    )
+
+
+def test_wait_for_speakers(kubectl, harness, charm):
+    harness.disable_hooks()
+    config_dict = {
+        "bgp-speakers": """- name: my-speaker
+  node-selector: juju-application=kubernetes-worker
+  neighbor-address: '10.32.32.1'
+  neighbor-as: 65030
+  cluster-as: 65000
+  announce-cluster-ip: true
+  log-level: 5""",
+    }
+    harness.update_config(config_dict)
+    charm.wait_for_speakers()
+    kubectl.assert_called_once_with(
+        charm,
+        "rollout",
+        "status",
+        "-n",
+        "kube-system",
+        "deployment/my-speaker",
         "--timeout",
         "1s",
     )
@@ -1004,11 +1027,10 @@ def test_apply_speaker(
   neighbor-as: 65030
   cluster-as: 65000
   announce-cluster-ip: true
-  v: 2"""
+  log-level: 5"""
     speaker_config_list = list(yaml.safe_load(speaker_yaml))
     (
         kube_ovn_speaker,
-
     ) = get_resource.side_effect = [
         mock.MagicMock(),
     ]
@@ -1045,7 +1067,7 @@ def test_apply_speaker(
         kube_ovn_speaker_container,
         args={
             "--announce-cluster-ip": True,
-            "--v": 2,
+            "--v": 5,
         },
     )
 
@@ -1055,16 +1077,39 @@ def test_apply_speaker(
     label_bgp_nodes.assert_called_once_with("juju-application=kubernetes-worker")
     apply_manifest.assert_called_once_with(resources, "my-speaker.speaker.yaml")
 
+    # Also try with a config that does not provide the announce-cluster-ip or log-level keys
+    (
+        kube_ovn_speaker,
+    ) = get_resource.side_effect = [
+        mock.MagicMock(),
+    ]
 
-@mock.patch("charm.KubeOvnCharm.get_registry")
+    (
+        kube_ovn_speaker_container,
+    ) = get_container_resource.side_effect = [
+        mock.MagicMock(),
+    ]
+    add_container_args.reset_mock()
+    speaker_yaml = """- name: my-speaker
+  node-selector: juju-application=kubernetes-worker
+  neighbor-address: '10.32.32.1'
+  neighbor-as: 65030
+  cluster-as: 65000"""
+    speaker_config_list = list(yaml.safe_load(speaker_yaml))
+    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, speaker_config_list[0])
+    add_container_args.assert_called_once_with(
+        kube_ovn_speaker_container,
+        args={
+            "--announce-cluster-ip": False,
+            "--v": 2,
+        },
+    )
+
+
 @mock.patch("charm.KubeOvnCharm.apply_speaker")
 @mock.patch("charm.KubeOvnCharm.remove_speakers")
-@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available")
-def test_configure_speakers(is_kubeconfig_available, remove_speakers, apply_speaker, get_registry, charm, harness):
+def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
     # Setup
-    is_kubeconfig_available.return_value = True
-    get_registry.return_value = DEFAULT_IMAGE_REGISTRY
-    get_registry.return_value = DEFAULT_IMAGE_REGISTRY
     harness.disable_hooks()
     config_dict = {
         "bgp-speakers": """- name: my-speaker
@@ -1073,14 +1118,14 @@ def test_configure_speakers(is_kubeconfig_available, remove_speakers, apply_spea
   neighbor-as: 65030
   cluster-as: 65000
   announce-cluster-ip: true
-  v: 2""",
+  log-level: 5""",
     }
     harness.update_config(config_dict)
-    charm.configure_speakers()
+    charm.apply_speakers(DEFAULT_IMAGE_REGISTRY)
     remove_speakers.assert_called_once()
     apply_speaker.assert_called_once_with(DEFAULT_IMAGE_REGISTRY,  {
         'name': 'my-speaker', 'node-selector': 'juju-application=kubernetes-worker', 'neighbor-address': '10.32.32.1',
-        'neighbor-as': 65030, 'cluster-as': 65000, 'announce-cluster-ip': True, 'v': 2})
+        'neighbor-as': 65030, 'cluster-as': 65000, 'announce-cluster-ip': True, 'log-level': 5})
 
     # Try with empty config option
     apply_speaker.reset_mock()
@@ -1089,13 +1134,8 @@ def test_configure_speakers(is_kubeconfig_available, remove_speakers, apply_spea
         "bgp-speakers": "",
     }
     harness.update_config(config_dict)
-    charm.configure_speakers()
+    charm.apply_speakers(DEFAULT_IMAGE_REGISTRY)
     apply_speaker.assert_not_called()
-
-    # Try without kubeconfig being available
-    is_kubeconfig_available.return_value = False
-    charm.configure_speakers()
-    assert charm.unit.status == WaitingStatus("Waiting for CNI relation")
 
 
 @pytest.mark.parametrize("leader", [True, False])
