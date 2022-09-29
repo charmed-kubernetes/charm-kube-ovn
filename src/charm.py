@@ -166,7 +166,11 @@ class KubeOvnCharm(CharmBase):
         kube_ovn_monitor = self.get_resource(
             resources, kind="Deployment", name="kube-ovn-monitor"
         )
-        self.replace_node_selector(kube_ovn_monitor, self.model.config["control-plane-node-label"], "kube-ovn/role")
+        self.replace_node_selector(
+            kube_ovn_monitor,
+            self.model.config["control-plane-node-label"],
+            "kube-ovn/role",
+        )
         self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
@@ -184,7 +188,9 @@ class KubeOvnCharm(CharmBase):
         ovn_central = self.get_resource(
             resources, kind="Deployment", name="ovn-central"
         )
-        self.replace_node_selector(ovn_central, self.model.config["control-plane-node-label"], "kube-ovn/role")
+        self.replace_node_selector(
+            ovn_central, self.model.config["control-plane-node-label"], "kube-ovn/role"
+        )
         self.set_replicas(ovn_central, len(node_ips))
 
         ovn_central_container = self.get_container_resource(
@@ -216,13 +222,17 @@ class KubeOvnCharm(CharmBase):
         self.add_container_args(
             speaker_container,
             args={
-                 "--announce-cluster-ip": speaker_config_element.get("announce-cluster-ip", False),
-                 "--v": speaker_config_element.get("log-level", 2),
+                "--announce-cluster-ip": speaker_config_element.get(
+                    "announce-cluster-ip", False
+                ),
+                "--v": speaker_config_element.get("log-level", 2),
             },
         )
         self.replace_images(resources, registry)
-        self.replace_node_selector(speaker, speaker_config_element["node-selector"], "ovn.kubernetes.io/bgp")
-        self.replace_name(speaker, speaker_config_element['name'])
+        self.replace_node_selector(
+            speaker, speaker_config_element["node-selector"], "ovn.kubernetes.io/bgp"
+        )
+        self.replace_name(speaker, speaker_config_element["name"])
         self.label_bgp_nodes(speaker_config_element["node-selector"])
         self.apply_manifest(resources, f"{speaker_config_element['name']}.speaker.yaml")
 
@@ -239,7 +249,9 @@ class KubeOvnCharm(CharmBase):
                         try:
                             self.kubectl("delete", "-f", filepath)
                         except CalledProcessError as e:
-                            log.error(f"Error removing speaker daemonset defined in {filepath}: {e}")
+                            log.error(
+                                f"Error removing speaker daemonset defined in {filepath}: {e}"
+                            )
                     try:
                         os.remove(filepath)
                     except FileNotFoundError as e:
@@ -305,7 +317,9 @@ class KubeOvnCharm(CharmBase):
     def apply_speakers(self, registry):
         self.remove_speakers()
         if self.model.config["bgp-speakers"]:
-            speaker_config_list = list(yaml.safe_load(self.model.config["bgp-speakers"]))
+            speaker_config_list = list(
+                yaml.safe_load(self.model.config["bgp-speakers"])
+            )
             for speaker_config in speaker_config_list:
                 self.apply_speaker(registry, speaker_config)
 
@@ -560,15 +574,26 @@ class KubeOvnCharm(CharmBase):
         nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
         for node in nodes:
             if node["metadata"]["labels"].get(label_key) == label_value:
-                log.info(f"Labeling node {node['metadata']['name']} with ovn.kubernetes.io/bgp=true")
-                self.kubectl("label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp=true")
+                log.info(
+                    f"Labeling node {node['metadata']['name']} with ovn.kubernetes.io/bgp=true"
+                )
+                self.kubectl(
+                    "label",
+                    "nodes",
+                    node["metadata"]["name"],
+                    "ovn.kubernetes.io/bgp=true",
+                )
 
     def unlabel_bgp_nodes(self):
         nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
         for node in nodes:
             if node["metadata"]["labels"].get("ovn.kubernetes.io/bgp"):
-                log.info(f"Removing ovn.kubernetes.io/bgp label from node {node['metadata']['name']}")
-                self.kubectl("label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp-")
+                log.info(
+                    f"Removing ovn.kubernetes.io/bgp label from node {node['metadata']['name']}"
+                )
+                self.kubectl(
+                    "label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp-"
+                )
 
     def restart_pods(self):
         self.unit.status = MaintenanceStatus("Restarting pods")
@@ -619,7 +644,9 @@ class KubeOvnCharm(CharmBase):
 
     def wait_for_speakers(self):
         if self.model.config["bgp-speakers"]:
-            speaker_config_list = list(yaml.safe_load(self.model.config["bgp-speakers"]))
+            speaker_config_list = list(
+                yaml.safe_load(self.model.config["bgp-speakers"])
+            )
             for speaker_config in speaker_config_list:
                 speaker_name = speaker_config["name"]
                 self.unit.status = WaitingStatus(f"Waiting for speaker {speaker_name}")

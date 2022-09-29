@@ -24,6 +24,7 @@ def kubectl(request):
     with mock.patch("charm.KubeOvnCharm.kubectl", autospec=True) as mocked:
         yield mocked
 
+
 @pytest.fixture(autouse=True)
 def unlabel_bgp_nodes(request):
     """Mock out unlabel_bgp_nodes."""

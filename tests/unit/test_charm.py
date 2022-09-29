@@ -2,7 +2,7 @@
 # See LICENSE file for licensing details.
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
-
+import logging
 from subprocess import CalledProcessError
 import unittest.mock as mock
 from pathlib import Path
@@ -114,7 +114,9 @@ def test_replace_node_selector(harness, charm):
     resource = dict(
         spec=dict(template=dict(spec=dict(nodeSelector={"kube-ovn/role": "deleteMe"})))
     )
-    charm.replace_node_selector(resource, config_dict["control-plane-node-label"], "kube-ovn/role")
+    charm.replace_node_selector(
+        resource, config_dict["control-plane-node-label"], "kube-ovn/role"
+    )
     assert "juju-charm" in resource["spec"]["template"]["spec"]["nodeSelector"]
     assert "kube-ovn/role" not in resource["spec"]["template"]["spec"]["nodeSelector"]
 
@@ -146,6 +148,13 @@ def test_replace_images(harness, charm):
         pod_spec["initContainers"][0]["image"]
         == "rocks.canonical.com:443/cdk/cooler/image:latest"
     )
+
+
+def test_replace_name(charm):
+    resource = dict(metadata={"name": "replace-me"})
+    charm.replace_name(resource, "new-name")
+    assert "new-name" in resource["metadata"]["name"]
+    assert "replace-me" not in resource["metadata"]["name"]
 
 
 def test_replace_container_env_vars(charm):
@@ -606,8 +615,11 @@ def test_apply_kube_ovn(
         )
     )
 
-    replace_node_selector.assert_called_once_with(kube_ovn_monitor, harness.charm.config["control-plane-node-label"],
-                                                  "kube-ovn/role")
+    replace_node_selector.assert_called_once_with(
+        kube_ovn_monitor,
+        harness.charm.config["control-plane-node-label"],
+        "kube-ovn/role",
+    )
     assert kube_ovn_monitor["spec"]["replicas"] == len(node_ips)
 
     apply_manifest.assert_called_once_with(resources, "kube-ovn.yaml")
@@ -631,7 +643,7 @@ def test_apply_ovn(
     get_ovn_node_ips,
     load_manifest,
     charm,
-    harness
+    harness,
 ):
     node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
     ovn_central = get_resource.return_value = dict(spec=dict(replicas=None))
@@ -649,8 +661,9 @@ def test_apply_ovn(
         resources, kind="Deployment", name="ovn-central"
     )
 
-    replace_node_selector.assert_called_once_with(ovn_central, harness.charm.config["control-plane-node-label"],
-                                                  "kube-ovn/role")
+    replace_node_selector.assert_called_once_with(
+        ovn_central, harness.charm.config["control-plane-node-label"], "kube-ovn/role"
+    )
     assert ovn_central["spec"]["replicas"] == len(node_ips)
 
     get_container_resource.assert_called_once_with(
@@ -1029,15 +1042,11 @@ def test_apply_speaker(
   announce-cluster-ip: true
   log-level: 5"""
     speaker_config_list = list(yaml.safe_load(speaker_yaml))
-    (
-        kube_ovn_speaker,
-    ) = get_resource.side_effect = [
+    (kube_ovn_speaker,) = get_resource.side_effect = [
         mock.MagicMock(),
     ]
 
-    (
-        kube_ovn_speaker_container,
-    ) = get_container_resource.side_effect = [
+    (kube_ovn_speaker_container,) = get_container_resource.side_effect = [
         mock.MagicMock(),
     ]
 
@@ -1050,18 +1059,22 @@ def test_apply_speaker(
     load_manifest.assert_called_once_with("speaker.yaml")
     resources = load_manifest.return_value
     replace_images.assert_called_once_with(resources, DEFAULT_IMAGE_REGISTRY)
-    get_resource.assert_called_once_with(resources, kind="DaemonSet", name="kube-ovn-speaker")
+    get_resource.assert_called_once_with(
+        resources, kind="DaemonSet", name="kube-ovn-speaker"
+    )
 
-    get_container_resource.assert_called_once_with(kube_ovn_speaker, container_name="kube-ovn-speaker")
+    get_container_resource.assert_called_once_with(
+        kube_ovn_speaker, container_name="kube-ovn-speaker"
+    )
 
     replace_container_args.assert_called_once_with(
-                kube_ovn_speaker_container,
-                args={
-                    "--neighbor-address": "10.32.32.1",
-                    "--neighbor-as": 65030,
-                    "--cluster-as": 65000,
-                },
-            )
+        kube_ovn_speaker_container,
+        args={
+            "--neighbor-address": "10.32.32.1",
+            "--neighbor-as": 65030,
+            "--cluster-as": 65000,
+        },
+    )
 
     add_container_args.assert_called_once_with(
         kube_ovn_speaker_container,
@@ -1071,22 +1084,19 @@ def test_apply_speaker(
         },
     )
 
-    replace_node_selector.assert_called_once_with(kube_ovn_speaker, "juju-application=kubernetes-worker",
-                                                  "ovn.kubernetes.io/bgp")
+    replace_node_selector.assert_called_once_with(
+        kube_ovn_speaker, "juju-application=kubernetes-worker", "ovn.kubernetes.io/bgp"
+    )
     replace_name.assert_called_once_with(kube_ovn_speaker, "my-speaker")
     label_bgp_nodes.assert_called_once_with("juju-application=kubernetes-worker")
     apply_manifest.assert_called_once_with(resources, "my-speaker.speaker.yaml")
 
     # Also try with a config that does not provide the announce-cluster-ip or log-level keys
-    (
-        kube_ovn_speaker,
-    ) = get_resource.side_effect = [
+    (kube_ovn_speaker,) = get_resource.side_effect = [
         mock.MagicMock(),
     ]
 
-    (
-        kube_ovn_speaker_container,
-    ) = get_container_resource.side_effect = [
+    (kube_ovn_speaker_container,) = get_container_resource.side_effect = [
         mock.MagicMock(),
     ]
     add_container_args.reset_mock()
@@ -1123,9 +1133,18 @@ def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
     harness.update_config(config_dict)
     charm.apply_speakers(DEFAULT_IMAGE_REGISTRY)
     remove_speakers.assert_called_once()
-    apply_speaker.assert_called_once_with(DEFAULT_IMAGE_REGISTRY,  {
-        'name': 'my-speaker', 'node-selector': 'juju-application=kubernetes-worker', 'neighbor-address': '10.32.32.1',
-        'neighbor-as': 65030, 'cluster-as': 65000, 'announce-cluster-ip': True, 'log-level': 5})
+    apply_speaker.assert_called_once_with(
+        DEFAULT_IMAGE_REGISTRY,
+        {
+            "name": "my-speaker",
+            "node-selector": "juju-application=kubernetes-worker",
+            "neighbor-address": "10.32.32.1",
+            "neighbor-as": 65030,
+            "cluster-as": 65000,
+            "announce-cluster-ip": True,
+            "log-level": 5,
+        },
+    )
 
     # Try with empty config option
     apply_speaker.reset_mock()
@@ -1142,10 +1161,17 @@ def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
 @mock.patch("charm.os.path.isdir")
 @mock.patch("charm.os.listdir")
 @mock.patch("charm.os.remove")
-def test_remove_speakers(remove, listdir, isdir, kubectl, unlabel_bgp_nodes, harness, leader):
+def test_remove_speakers(
+    remove, listdir, isdir, kubectl, unlabel_bgp_nodes, harness, leader, caplog
+):
     harness.set_leader(leader)
     harness.begin()
-    listdir.return_value = ["somefile.yaml", "one.speaker.yaml", "two.speaker.yaml", "otherfile.yaml"]
+    listdir.return_value = [
+        "somefile.yaml",
+        "one.speaker.yaml",
+        "two.speaker.yaml",
+        "otherfile.yaml",
+    ]
     isdir.return_value = True
     unlabel_bgp_nodes.reset_mock()
     harness.charm.remove_speakers()
@@ -1153,8 +1179,12 @@ def test_remove_speakers(remove, listdir, isdir, kubectl, unlabel_bgp_nodes, har
         assert len(kubectl.call_args_list) == 2
         kubectl.assert_has_calls(
             [
-                mock.call(harness.charm, "delete", "-f", "templates/rendered/one.speaker.yaml"),
-                mock.call(harness.charm, "delete", "-f", "templates/rendered/two.speaker.yaml"),
+                mock.call(
+                    harness.charm, "delete", "-f", "templates/rendered/one.speaker.yaml"
+                ),
+                mock.call(
+                    harness.charm, "delete", "-f", "templates/rendered/two.speaker.yaml"
+                ),
             ]
         )
     else:
@@ -1169,18 +1199,33 @@ def test_remove_speakers(remove, listdir, isdir, kubectl, unlabel_bgp_nodes, har
 
     unlabel_bgp_nodes.assert_called_once()
 
+    # Test the kubectl failure path
+    if leader:
+        kubectl.side_effect = CalledProcessError(1, "error")
+        with caplog.at_level(logging.INFO):
+            harness.charm.remove_speakers()
+        assert "Error removing speaker daemonset" in caplog.text
+
+    # Test the os.remove failure path
+    remove.side_effect = FileNotFoundError("error")
+    with caplog.at_level(logging.INFO):
+        harness.charm.remove_speakers()
+    assert "Error deleting rendered yaml" in caplog.text
+
 
 def test_label_bgp_nodes(charm, kubectl):
     kubectl.side_effect = [
         '{"items": [{"metadata": {"name": "the-node", "labels": {"juju-application": "kubernetes-worker"}}}, {"metadata": {"name": "other-node", "labels": {"some-label": "some-value"}}}]}',
-        ""
+        "",
     ]
     charm.label_bgp_nodes("juju-application=kubernetes-worker")
     assert len(kubectl.call_args_list) == 2
     kubectl.assert_has_calls(
         [
             mock.call(charm, "get", "nodes", "-o", "json"),
-            mock.call(charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp=true"),
+            mock.call(
+                charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp=true"
+            ),
         ]
     )
 
@@ -1191,13 +1236,15 @@ def test_unlabel_bgp_nodes(kubectl, harness):
     harness.begin()
     kubectl.side_effect = [
         '{"items": [{"metadata": {"name": "the-node", "labels": {"ovn.kubernetes.io/bgp": "true"}}}, {"metadata": {"name": "other-node", "labels": {"some-label": "some-value"}}}]}',
-        ""
+        "",
     ]
     harness.charm.unlabel_bgp_nodes()
     assert len(kubectl.call_args_list) == 2
     kubectl.assert_has_calls(
         [
             mock.call(harness.charm, "get", "nodes", "-o", "json"),
-            mock.call(harness.charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp-"),
+            mock.call(
+                harness.charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp-"
+            ),
         ]
     )

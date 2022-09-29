@@ -8,8 +8,6 @@ import shlex
 import pytest
 import logging
 import json
-import yaml
-import time
 import re
 from lightkube.types import PatchType
 
@@ -20,6 +18,7 @@ from tenacity import (
     stop_after_attempt,
     stop_after_delay,
     wait_fixed,
+    before_log,
 )
 
 
@@ -309,53 +308,59 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
 
 
-async def test_bgp_pods(bird, ops_test, annotated_nginx_pods):
-    log.info("Verifying pods are reachable from bird ...")
-    deadline = time.time() + 60 * 10
-    # TODO: Use tenacity here instead so things are cleaner
-    for pod in annotated_nginx_pods:
-        while time.time() < deadline:
-            retcode, stdout, stderr = await ops_test.run(
-                'juju', 'ssh', '-m', ops_test.model_full_name, 'bird/leader',
-                'curl', '--connect-timeout', '10', pod.status.podIP
-            )
-            if retcode == 0:
-                break
-        else:
-            pytest.fail("Failed pod connection test")
+class BGPError(Exception):
+    pass
 
 
-async def test_bgp_subnet(bird, ops_test, annotated_subnet_nginx_pods):
-    log.info("Verifying pods are reachable from bird via exposed subnet ...")
-    deadline = time.time() + 60 * 10
-    # TODO: Use tenacity here instead so things are cleaner
-    for pod in annotated_subnet_nginx_pods:
-        while time.time() < deadline:
-            retcode, stdout, stderr = await ops_test.run(
-                'juju', 'ssh', '-m', ops_test.model_full_name, 'bird/leader',
-                'curl', '--connect-timeout', '10', pod.status.podIP
-            )
-            if retcode == 0:
-                break
-        else:
-            pytest.fail("Failed subnet connection test")
-
-
-async def test_bgp_service(nginx_cluster_ip, bird, ops_test):
-    log.info("Verifying service is reachable from bird ...")
-    deadline = time.time() + 60 * 10
-    # TODO: Use tenacity here instead so things are cleaner
-    while time.time() < deadline:
-        retcode, stdout, stderr = await ops_test.run(
-            'juju', 'ssh', '-m', ops_test.model_full_name, 'bird/leader',
-            'curl', '--connect-timeout', '10', nginx_cluster_ip
-        )
-        if retcode == 0:
-            break
+@retry(
+    retry=retry_if_exception_type(BGPError),
+    stop=stop_after_delay(60 * 10),
+    wait=wait_fixed(1),
+    before=before_log(log, logging.INFO),
+)
+async def run_bird_curl_test(ops_test, unit, ip_to_curl):
+    retcode, stdout, stderr = await ops_test.run(
+        "juju",
+        "ssh",
+        "-m",
+        ops_test.model_full_name,
+        unit.name,
+        "curl",
+        "--connect-timeout",
+        "5",
+        ip_to_curl,
+    )
+    if retcode == 0:
+        return True
     else:
-        pytest.fail("Failed service connection test")
+        raise BGPError(f"failed to reach {ip_to_curl} from {unit.name}")
 
-# TODO: Test multi-speaker deployment
+
+@pytest.mark.usefixtures("bird")
+async def test_bgp_pods(ops_test, annotated_nginx_pods):
+    log.info("Verifying pods are reachable from bird units ...")
+    bird_app = ops_test.model.applications["bird"]
+    for unit in bird_app.units:
+        for pod in annotated_nginx_pods:
+            assert await run_bird_curl_test(ops_test, unit, pod.status.podIP)
+
+
+@pytest.mark.usefixtures("bird")
+async def test_bgp_subnet(ops_test, annotated_subnet_nginx_pods):
+    log.info("Verifying pods are reachable from bird units via exposed subnet ...")
+    bird_app = ops_test.model.applications["bird"]
+    for unit in bird_app.units:
+        for pod in annotated_subnet_nginx_pods:
+            assert await run_bird_curl_test(ops_test, unit, pod.status.podIP)
+
+
+@pytest.mark.usefixtures("bird")
+async def test_bgp_service(ops_test, nginx_cluster_ip):
+    log.info("Verifying service is reachable from bird units ...")
+    bird_app = ops_test.model.applications["bird"]
+    for unit in bird_app.units:
+        assert await run_bird_curl_test(ops_test, unit, nginx_cluster_ip)
+
 
 class iPerfError(Exception):
     pass
@@ -508,5 +513,10 @@ async def annotate_obj(client, obj, annotation_dict, patch_type=PatchType.STRATE
     log.info(f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ...")
     obj.metadata.annotations = annotation_dict
     client.patch(
-        type(obj), obj.metadata.name, obj, namespace=obj.metadata.namespace, force=True, patch_type=patch_type
+        type(obj),
+        obj.metadata.name,
+        obj,
+        namespace=obj.metadata.namespace,
+        force=True,
+        patch_type=patch_type,
     )
