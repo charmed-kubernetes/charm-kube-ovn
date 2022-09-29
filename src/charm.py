@@ -233,7 +233,6 @@ class KubeOvnCharm(CharmBase):
             speaker, speaker_config_element["node-selector"], "ovn.kubernetes.io/bgp"
         )
         self.replace_name(speaker, speaker_config_element["name"])
-        self.label_bgp_nodes(speaker_config_element["node-selector"])
         self.apply_manifest(resources, f"{speaker_config_element['name']}.speaker.yaml")
 
     def remove_speakers(self):
@@ -256,8 +255,6 @@ class KubeOvnCharm(CharmBase):
                         os.remove(filepath)
                     except FileNotFoundError as e:
                         log.error(f"Error deleting rendered yaml {filepath}: {e}")
-
-        self.unlabel_bgp_nodes()
 
     def check_if_pod_restart_will_be_needed(self):
         output = self.kubectl(
@@ -296,14 +293,14 @@ class KubeOvnCharm(CharmBase):
             self.apply_crds()
             self.apply_ovn(registry)
             self.apply_kube_ovn(service_cidr, registry)
-            self.apply_speakers(registry)
 
             if self.stored.pod_restart_needed:
                 self.wait_for_ovn_central()
                 self.wait_for_kube_ovn_controller()
                 self.wait_for_kube_ovn_cni()
-                self.wait_for_speakers()
                 self.restart_pods()
+
+            self.apply_speakers(registry)
 
         except CalledProcessError:
             # Likely the Kubernetes API is unavailable. Log the exception in
@@ -569,32 +566,6 @@ class KubeOvnCharm(CharmBase):
     def replace_name(self, resource, new_name):
         resource["metadata"]["name"] = new_name
 
-    def label_bgp_nodes(self, node_selector):
-        label_key, label_value = node_selector.split("=")
-        nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
-        for node in nodes:
-            if node["metadata"]["labels"].get(label_key) == label_value:
-                log.info(
-                    f"Labeling node {node['metadata']['name']} with ovn.kubernetes.io/bgp=true"
-                )
-                self.kubectl(
-                    "label",
-                    "nodes",
-                    node["metadata"]["name"],
-                    "ovn.kubernetes.io/bgp=true",
-                )
-
-    def unlabel_bgp_nodes(self):
-        nodes = json.loads(self.kubectl("get", "nodes", "-o", "json"))["items"]
-        for node in nodes:
-            if node["metadata"]["labels"].get("ovn.kubernetes.io/bgp"):
-                log.info(
-                    f"Removing ovn.kubernetes.io/bgp label from node {node['metadata']['name']}"
-                )
-                self.kubectl(
-                    "label", "nodes", node["metadata"]["name"], "ovn.kubernetes.io/bgp-"
-                )
-
     def restart_pods(self):
         self.unit.status = MaintenanceStatus("Restarting pods")
         namespaces = [
@@ -641,16 +612,6 @@ class KubeOvnCharm(CharmBase):
     def wait_for_ovn_central(self):
         self.unit.status = WaitingStatus("Waiting for ovn-central")
         self.wait_for_rollout("deployment/ovn-central")
-
-    def wait_for_speakers(self):
-        if self.model.config["bgp-speakers"]:
-            speaker_config_list = list(
-                yaml.safe_load(self.model.config["bgp-speakers"])
-            )
-            for speaker_config in speaker_config_list:
-                speaker_name = speaker_config["name"]
-                self.unit.status = WaitingStatus(f"Waiting for speaker {speaker_name}")
-                self.wait_for_rollout(f"deployment/{speaker_name}")
 
     def wait_for_rollout(self, name, namespace="kube-system", timeout=1):
         self.kubectl(

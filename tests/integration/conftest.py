@@ -692,29 +692,33 @@ async def bird(ops_test):
     )
 
 
-@pytest.fixture()
-def annotated_nginx_pods(nginx_pods, annotate, default_subnet, client):
-    for nginx_pod in nginx_pods():
-        annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
+@pytest_asyncio.fixture(params=["pods", "subnet", "service"])
+async def ips_to_curl(request, nginx_pods, nginx_cluster_ip, annotate, kubectl):
+    if request.param == "pods":
+        for nginx_pod in nginx_pods():
+            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
+        log.info("Using annotated pod IPs ...")
+        yield [pod.status.podIP for pod in nginx_pods()]
+        for nginx_pod in nginx_pods():
+            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
 
-    yield nginx_pods()
+    if request.param == "subnet":
+        # For some reason lightkube is having trouble annotating the custom subnet resource, so using kubectl instead
+        # Lightkube doesn't fail, it just doesn't seem to apply the annotation
+        shcmd = (
+            "annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true"
+        )
+        log.info("Annotating default subnet with ovn.kubernetes.io/bgp=true ...")
+        await kubectl(*shlex.split(shcmd))
+        log.info("Using annotated subnet pod IPs ...")
+        yield [pod.status.podIP for pod in nginx_pods()]
+        log.info("Removing ovn.kubernetes.io/bgp annotation from default subnet ...")
+        shcmd = "annotate subnet ovn-default ovn.kubernetes.io/bgp- --overwrite=true"
+        await kubectl(*shlex.split(shcmd))
 
-    for nginx_pod in nginx_pods():
-        annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
-
-
-@pytest_asyncio.fixture()
-async def annotated_subnet_nginx_pods(nginx_pods, default_subnet, client, kubectl):
-    # For some reason lightkube is having trouble annotating the custom subnet resource, so using kubectl instead
-    # Lightkube doesn't fail, it just doesn't seem to apply the annotation
-    shcmd = "annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true"
-    log.info("Annotating default subnet with ovn.kubernetes.io/bgp=true ...")
-    await kubectl(*shlex.split(shcmd))
-    yield nginx_pods()
-
-    log.info("Removing ovn.kubernetes.io/bgp annotation from default subnet ...")
-    shcmd = "annotate subnet ovn-default ovn.kubernetes.io/bgp- --overwrite=true"
-    await kubectl(*shlex.split(shcmd))
+    if request.param == "service":
+        log.info("Using service IP ...")
+        yield [nginx_cluster_ip]
 
 
 @pytest.fixture(scope="module")

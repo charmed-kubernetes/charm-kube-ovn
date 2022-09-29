@@ -9,7 +9,6 @@ import pytest
 import logging
 import json
 import re
-from lightkube.types import PatchType
 
 from ipaddress import ip_address, ip_network
 from tenacity import (
@@ -337,29 +336,13 @@ async def run_bird_curl_test(ops_test, unit, ip_to_curl):
 
 
 @pytest.mark.usefixtures("bird")
-async def test_bgp_pods(ops_test, annotated_nginx_pods):
-    log.info("Verifying pods are reachable from bird units ...")
+async def test_bgp(ops_test, ips_to_curl):
+    log.info("Verifying the following IPs are reachable from bird units ...")
+    log.info(ips_to_curl)
     bird_app = ops_test.model.applications["bird"]
     for unit in bird_app.units:
-        for pod in annotated_nginx_pods:
-            assert await run_bird_curl_test(ops_test, unit, pod.status.podIP)
-
-
-@pytest.mark.usefixtures("bird")
-async def test_bgp_subnet(ops_test, annotated_subnet_nginx_pods):
-    log.info("Verifying pods are reachable from bird units via exposed subnet ...")
-    bird_app = ops_test.model.applications["bird"]
-    for unit in bird_app.units:
-        for pod in annotated_subnet_nginx_pods:
-            assert await run_bird_curl_test(ops_test, unit, pod.status.podIP)
-
-
-@pytest.mark.usefixtures("bird")
-async def test_bgp_service(ops_test, nginx_cluster_ip):
-    log.info("Verifying service is reachable from bird units ...")
-    bird_app = ops_test.model.applications["bird"]
-    for unit in bird_app.units:
-        assert await run_bird_curl_test(ops_test, unit, nginx_cluster_ip)
+        for ip in ips_to_curl:
+            assert await run_bird_curl_test(ops_test, unit, ip)
 
 
 class iPerfError(Exception):
@@ -507,16 +490,3 @@ def parse_tc_show(stdout):
     # Limit value directly follows the string limit
     limit_value = netem_split[limit_index + 1]
     return int(limit_value)
-
-
-async def annotate_obj(client, obj, annotation_dict, patch_type=PatchType.STRATEGIC):
-    log.info(f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ...")
-    obj.metadata.annotations = annotation_dict
-    client.patch(
-        type(obj),
-        obj.metadata.name,
-        obj,
-        namespace=obj.metadata.namespace,
-        force=True,
-        patch_type=patch_type,
-    )

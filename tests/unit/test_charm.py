@@ -327,31 +327,6 @@ def test_wait_for(kubectl, charm, name, resource):
     )
 
 
-def test_wait_for_speakers(kubectl, harness, charm):
-    harness.disable_hooks()
-    config_dict = {
-        "bgp-speakers": """- name: my-speaker
-  node-selector: juju-application=kubernetes-worker
-  neighbor-address: '10.32.32.1'
-  neighbor-as: 65030
-  cluster-as: 65000
-  announce-cluster-ip: true
-  log-level: 5""",
-    }
-    harness.update_config(config_dict)
-    charm.wait_for_speakers()
-    kubectl.assert_called_once_with(
-        charm,
-        "rollout",
-        "status",
-        "-n",
-        "kube-system",
-        "deployment/my-speaker",
-        "--timeout",
-        "1s",
-    )
-
-
 def test_apply_manifest(charm, kubectl):
     with mock.patch("charm.KubeOvnCharm.render_manifest") as render_manifest:
         charm.apply_manifest("any-manifest", "any-name")
@@ -1018,11 +993,9 @@ def test_patch_prometheus_resources(mock_render, charm, kubectl, remove):
 @mock.patch("charm.KubeOvnCharm.replace_name")
 @mock.patch("charm.KubeOvnCharm.add_container_args")
 @mock.patch("charm.KubeOvnCharm.replace_container_args")
-@mock.patch("charm.KubeOvnCharm.label_bgp_nodes")
 @mock.patch("charm.KubeOvnCharm.apply_manifest")
 def test_apply_speaker(
     apply_manifest,
-    label_bgp_nodes,
     replace_container_args,
     add_container_args,
     replace_name,
@@ -1088,7 +1061,6 @@ def test_apply_speaker(
         kube_ovn_speaker, "juju-application=kubernetes-worker", "ovn.kubernetes.io/bgp"
     )
     replace_name.assert_called_once_with(kube_ovn_speaker, "my-speaker")
-    label_bgp_nodes.assert_called_once_with("juju-application=kubernetes-worker")
     apply_manifest.assert_called_once_with(resources, "my-speaker.speaker.yaml")
 
     # Also try with a config that does not provide the announce-cluster-ip or log-level keys
@@ -1161,9 +1133,7 @@ def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
 @mock.patch("charm.os.path.isdir")
 @mock.patch("charm.os.listdir")
 @mock.patch("charm.os.remove")
-def test_remove_speakers(
-    remove, listdir, isdir, kubectl, unlabel_bgp_nodes, harness, leader, caplog
-):
+def test_remove_speakers(remove, listdir, isdir, kubectl, harness, leader, caplog):
     harness.set_leader(leader)
     harness.begin()
     listdir.return_value = [
@@ -1173,7 +1143,6 @@ def test_remove_speakers(
         "otherfile.yaml",
     ]
     isdir.return_value = True
-    unlabel_bgp_nodes.reset_mock()
     harness.charm.remove_speakers()
     if leader:
         assert len(kubectl.call_args_list) == 2
@@ -1197,8 +1166,6 @@ def test_remove_speakers(
         ]
     )
 
-    unlabel_bgp_nodes.assert_called_once()
-
     # Test the kubectl failure path
     if leader:
         kubectl.side_effect = CalledProcessError(1, "error")
@@ -1211,40 +1178,3 @@ def test_remove_speakers(
     with caplog.at_level(logging.INFO):
         harness.charm.remove_speakers()
     assert "Error deleting rendered yaml" in caplog.text
-
-
-def test_label_bgp_nodes(charm, kubectl):
-    kubectl.side_effect = [
-        '{"items": [{"metadata": {"name": "the-node", "labels": {"juju-application": "kubernetes-worker"}}}, {"metadata": {"name": "other-node", "labels": {"some-label": "some-value"}}}]}',
-        "",
-    ]
-    charm.label_bgp_nodes("juju-application=kubernetes-worker")
-    assert len(kubectl.call_args_list) == 2
-    kubectl.assert_has_calls(
-        [
-            mock.call(charm, "get", "nodes", "-o", "json"),
-            mock.call(
-                charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp=true"
-            ),
-        ]
-    )
-
-
-@pytest.mark.skip_unlabel_bgp_nodes_mock
-def test_unlabel_bgp_nodes(kubectl, harness):
-    harness.disable_hooks()
-    harness.begin()
-    kubectl.side_effect = [
-        '{"items": [{"metadata": {"name": "the-node", "labels": {"ovn.kubernetes.io/bgp": "true"}}}, {"metadata": {"name": "other-node", "labels": {"some-label": "some-value"}}}]}',
-        "",
-    ]
-    harness.charm.unlabel_bgp_nodes()
-    assert len(kubectl.call_args_list) == 2
-    kubectl.assert_has_calls(
-        [
-            mock.call(harness.charm, "get", "nodes", "-o", "json"),
-            mock.call(
-                harness.charm, "label", "nodes", "the-node", "ovn.kubernetes.io/bgp-"
-            ),
-        ]
-    )
