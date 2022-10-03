@@ -11,6 +11,7 @@ import json
 import re
 
 from ipaddress import ip_address, ip_network
+from lightkube.types import PatchType
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -172,6 +173,40 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     assert actual_loss == expected_loss
 
 
+async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
+    isolated_pod, allowed_pod = isolated_subnet
+    stdout = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    )
+    actual_loss = ping_loss(stdout)
+    assert actual_loss == 100
+
+    log.info("Patching subnet with ACL rules ...")
+    subnet = client.get(subnet_resource, "isolated-subnet")
+    subnet.spec["acls"] = [
+        {
+            "action": "allow",
+            "direction": "to-lport",
+            "match": f"ip4.src=={allowed_pod.status.podIP} && ip4.dst=={isolated_pod.status.podIP}",
+            "priority": 2222,
+        }
+    ]
+    client.patch(
+        subnet_resource,
+        "isolated-subnet",
+        obj=subnet,
+        patch_type=PatchType.MERGE,
+        force=True,
+    )
+
+    stdout = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    )
+
+    actual_loss = ping_loss(stdout)
+    assert actual_loss == 0
+
+
 async def test_pod_netem_limit(ops_test, client, iperf3_pods):
     expected_limit = 100
     for pod in iperf3_pods:
@@ -227,6 +262,33 @@ async def test_gateway_qos(
         kubectl_exec, gateway_server, gateway_client_pod, namespace
     )
     assert isclose(egress_bw, 30, rel_tol=0.10)
+
+
+async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
+    isolated_pod, allowed_pod = isolated_subnet
+    stdout = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    )
+    actual_loss = ping_loss(stdout)
+    assert actual_loss == 100
+
+    log.info("Patching Subnet (allow 10.17.0.0/16 subnet) ...")
+    subnet = client.get(subnet_resource, "isolated-subnet")
+    subnet.spec["allowSubnets"] = ["10.17.0.0/16"]
+    client.patch(
+        subnet_resource,
+        "isolated-subnet",
+        obj=subnet,
+        patch_type=PatchType.MERGE,
+        force=True,
+    )
+
+    stdout = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    )
+
+    actual_loss = ping_loss(stdout)
+    assert actual_loss == 0
 
 
 async def test_grafana(

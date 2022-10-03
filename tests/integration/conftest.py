@@ -122,6 +122,48 @@ def gateway_client_pod(client, worker_node, subnet_resource):
 
 
 @pytest.fixture()
+async def isolated_subnet(client: Client):
+    log.info("Creating isolated subnet resources ...")
+    path = Path("tests/data/isolated-subnet.yaml")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.create(obj)
+    # Wait for the subnet and pods to become stable.
+    await asyncio.sleep(30)
+    pods = [
+        client.get(Pod, name="isolated-pod", namespace="isolated"),
+        client.get(Pod, name="allowed-pod", namespace="allowed"),
+    ]
+
+    for pod in pods:
+        client.wait(
+            Pod,
+            pod.metadata.name,
+            for_conditions=["Ready"],
+            namespace=pod.metadata.namespace,
+        )
+
+    yield tuple(pods)
+
+    log.info("Deleting isolated subnet resources ...")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
+
+    for pod in pods:
+        namespace = pod.metadata.namespace
+        remaining_pods = list(client.list(Pod, namespace=namespace))
+        while len(remaining_pods) != 0:
+            log.info("Isolated pods still in existence, waiting ...")
+            remaining_pods = list(client.list(Pod, namespace=namespace))
+            time.sleep(5)
+
+    for pod in pods:
+        namespace = pod.metadata.namespace
+        while namespace in list(client.list(Namespace)):
+            log.info(f"{namespace} namespace still in existence, waiting ...")
+            time.sleep(5)
+
+
+@pytest.fixture()
 def iperf3_pods(client):
     log.info("Creating iperf3 resources ...")
     path = Path.cwd() / "tests/data/iperf3_daemonset.yaml"
