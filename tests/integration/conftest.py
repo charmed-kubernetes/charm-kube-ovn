@@ -128,7 +128,7 @@ async def isolated_subnet(client: Client):
     for obj in codecs.load_all_yaml(path.read_text()):
         client.create(obj)
     # Wait for the subnet and pods to become stable.
-    await asyncio.sleep(30)
+    await asyncio.sleep(60)
     pods = [
         client.get(Pod, name="isolated-pod", namespace="isolated"),
         client.get(Pod, name="allowed-pod", namespace="allowed"),

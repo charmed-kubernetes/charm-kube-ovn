@@ -51,11 +51,8 @@ metadata:
   namespace: isolated
 spec:
   containers:
-  - name: busybox
-    image: busybox
-    command:
-      - sleep
-      - "3600"
+      - name: nginx
+        image: rocks.canonical.com/cdk/kubeovn/perf:latest
 ---
 apiVersion: v1
 kind: Pod
@@ -66,8 +63,5 @@ metadata:
   namespace: allowed
 spec:
   containers:
-  - name: busybox
-    image: busybox
-    command:
-      - sleep
-      - "3600"
+      - name: nginx
+        image: rocks.canonical.com/cdk/kubeovn/perf:latest
