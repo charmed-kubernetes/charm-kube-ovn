@@ -44,7 +44,10 @@ PROMETHEUS_RESOURCES = [
 
 
 class SpeakerConfig(BaseModel):
-    name: str = Field(..., regex="^[a-z0-9.-]+$",)
+    name: str = Field(
+        ...,
+        regex="^[a-z0-9.-]+$",
+    )
     node_selector: str = Field(
         ...,
         alias="node-selector",
