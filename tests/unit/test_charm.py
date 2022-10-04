@@ -3,18 +3,26 @@
 #
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 import logging
+from ipaddress import IPv4Address
+from pydantic import ValidationError
 from subprocess import CalledProcessError
 import unittest.mock as mock
 from pathlib import Path
 from contextlib import ExitStack as does_not_raise
 import json
-import yaml
 import pytest
-from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
+from ops.model import (
+    ActiveStatus,
+    MaintenanceStatus,
+    WaitingStatus,
+    BlockedStatus,
+    ModelError,
+)
 import ops.testing
 import ops.framework
 
 from charm import KubeOvnCharm
+from charm import SpeakerConfig
 
 ops.testing.SIMULATE_CAN_CONNECT = True
 DEFAULT_SERVICE_CIDR = "10.152.183.0/24"
@@ -1007,14 +1015,17 @@ def test_apply_speaker(
     charm,
 ):
     # Setup
-    speaker_yaml = """- name: my-speaker
-  node-selector: juju-application=kubernetes-worker
-  neighbor-address: '10.32.32.1'
-  neighbor-as: 65030
-  cluster-as: 65000
-  announce-cluster-ip: true
-  log-level: 5"""
-    speaker_config_list = list(yaml.safe_load(speaker_yaml))
+    speaker_dict = {
+        "name": "my-speaker",
+        "node-selector": "juju-application=kubernetes-worker",
+        "neighbor-address": "10.32.32.1",
+        "neighbor-as": 65030,
+        "cluster-as": 65000,
+        "announce-cluster-ip": True,
+        "log-level": 5,
+    }
+
+    parsed_speaker_config_dict = SpeakerConfig(**speaker_dict).dict(by_alias=True)
     (kube_ovn_speaker,) = get_resource.side_effect = [
         mock.MagicMock(),
     ]
@@ -1024,7 +1035,7 @@ def test_apply_speaker(
     ]
 
     # Test Method
-    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, speaker_config_list[0])
+    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, parsed_speaker_config_dict)
 
     # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Speaker resource")
@@ -1043,7 +1054,7 @@ def test_apply_speaker(
     replace_container_args.assert_called_once_with(
         kube_ovn_speaker_container,
         args={
-            "--neighbor-address": "10.32.32.1",
+            "--neighbor-address": IPv4Address("10.32.32.1"),
             "--neighbor-as": 65030,
             "--cluster-as": 65000,
         },
@@ -1072,13 +1083,16 @@ def test_apply_speaker(
         mock.MagicMock(),
     ]
     add_container_args.reset_mock()
-    speaker_yaml = """- name: my-speaker
-  node-selector: juju-application=kubernetes-worker
-  neighbor-address: '10.32.32.1'
-  neighbor-as: 65030
-  cluster-as: 65000"""
-    speaker_config_list = list(yaml.safe_load(speaker_yaml))
-    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, speaker_config_list[0])
+    speaker_dict = {
+        "name": "my-speaker",
+        "node-selector": "juju-application=kubernetes-worker",
+        "neighbor-address": "10.32.32.1",
+        "neighbor-as": 65030,
+        "cluster-as": 65000,
+    }
+
+    parsed_speaker_config_dict = SpeakerConfig(**speaker_dict).dict(by_alias=True)
+    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, parsed_speaker_config_dict)
     add_container_args.assert_called_once_with(
         kube_ovn_speaker_container,
         args={
@@ -1088,9 +1102,56 @@ def test_apply_speaker(
     )
 
 
+@pytest.mark.parametrize(
+    "test_input, expected_msgs",
+    [
+        (
+            {"name": ""},
+            [
+                "name\n  string does not match regex",
+            ],
+        ),
+        ({"neighbor-as": 0}, ["neighbor-as\n  ensure this value is greater than 0"]),
+        ({"cluster-as": 0}, ["cluster-as\n  ensure this value is greater than 0"]),
+        (
+            {"neighbor-as": 65536},
+            ["neighbor-as\n  ensure this value is less than 65536"],
+        ),
+        ({"cluster-as": 65536}, ["cluster-as\n  ensure this value is less than 65536"]),
+        (
+            {"neighbor-address": "invalidIP"},
+            ["neighbor-address\n  value is not a valid IPv4 or IPv6 address"],
+        ),
+        (
+            {},
+            [
+                "name\n  field required",
+                "node-selector\n  field required",
+                "neighbor-address\n  field required",
+                "neighbor-as\n  field required",
+                "cluster-as\n  field required",
+            ],
+        ),
+        (
+            {"node-selector": "key value"},
+            ["node-selector\n  string does not match regex"],
+        ),
+        (
+            {"log-level": "-1"},
+            ["log-level\n  ensure this value is greater than -1"],
+        ),
+    ],
+)
+def test_speaker_config_validation(test_input, expected_msgs):
+    with pytest.raises(ValidationError) as excinfo:
+        SpeakerConfig(**test_input)
+    for msg in expected_msgs:
+        assert msg in str(excinfo.value)
+
+
 @mock.patch("charm.KubeOvnCharm.apply_speaker")
 @mock.patch("charm.KubeOvnCharm.remove_speakers")
-def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
+def test_apply_speakers(remove_speakers, apply_speaker, harness, charm, caplog):
     # Setup
     harness.disable_hooks()
     config_dict = {
@@ -1110,7 +1171,7 @@ def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
         {
             "name": "my-speaker",
             "node-selector": "juju-application=kubernetes-worker",
-            "neighbor-address": "10.32.32.1",
+            "neighbor-address": IPv4Address("10.32.32.1"),
             "neighbor-as": 65030,
             "cluster-as": 65000,
             "announce-cluster-ip": True,
@@ -1120,13 +1181,30 @@ def test_apply_speakers(remove_speakers, apply_speaker, harness, charm):
 
     # Try with empty config option
     apply_speaker.reset_mock()
-    harness.disable_hooks()
     config_dict = {
         "bgp-speakers": "",
     }
     harness.update_config(config_dict)
     charm.apply_speakers(DEFAULT_IMAGE_REGISTRY)
     apply_speaker.assert_not_called()
+
+    # Try with an invalid config option
+    apply_speaker.reset_mock()
+    config_dict = {
+        "bgp-speakers": """- name:
+  node-selector: juju-application=kubernetes-worker
+  neighbor-address: '10.32.32.1'
+  neighbor-as: -2
+  cluster-as: -2
+  announce-cluster-ip: true
+  log-level: -2""",
+    }
+    harness.update_config(config_dict)
+    with caplog.at_level(logging.ERROR):
+        charm.apply_speakers(DEFAULT_IMAGE_REGISTRY)
+    apply_speaker.assert_not_called()
+    assert "Error validating bgp-speakers config:" in caplog.text
+    assert charm.unit.status == BlockedStatus("Error validating bgp-speakers config")
 
 
 @pytest.mark.parametrize("leader", [True, False])

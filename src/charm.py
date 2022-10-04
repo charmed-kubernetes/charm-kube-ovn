@@ -15,12 +15,20 @@ from ops.main import main
 from ops.model import (
     ActiveStatus,
     WaitingStatus,
+    BlockedStatus,
     MaintenanceStatus,
     ModelError,
 )
 from charms.grafana_k8s.v0.grafana_dashboard import GrafanaDashboardProvider
 from charms.prometheus_k8s.v0.prometheus_remote_write import (
     PrometheusRemoteWriteConsumer,
+)
+
+from pydantic import (
+    BaseModel,
+    IPvAnyAddress,
+    ValidationError,
+    Field,
 )
 
 log = logging.getLogger(__name__)
@@ -33,6 +41,20 @@ PROMETHEUS_RESOURCES = [
     {"kind": "deployment", "name": "kube-ovn-controller", "port": 10660},
     {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
 ]
+
+
+class SpeakerConfig(BaseModel):
+    name: str = Field(..., regex="^[a-z0-9.-]+$",)
+    node_selector: str = Field(
+        ...,
+        alias="node-selector",
+        regex="^[a-zA-Z0-9A-Za-z0-9_./-]+=[a-zA-Z0-9_.-]+$",
+    )
+    neighbor_address: IPvAnyAddress = Field(..., alias="neighbor-address")
+    neighbor_as: int = Field(..., alias="neighbor-as", gt=0, lt=65536)
+    cluster_as: int = Field(..., alias="cluster-as", gt=0, lt=65536)
+    announce_cluster_ip: bool = Field(False, alias="announce-cluster-ip")
+    log_level: int = Field(2, alias="log-level", gt=-1)
 
 
 class KubeOvnCharm(CharmBase):
@@ -314,11 +336,18 @@ class KubeOvnCharm(CharmBase):
     def apply_speakers(self, registry):
         self.remove_speakers()
         if self.model.config["bgp-speakers"]:
-            speaker_config_list = list(
+            raw_speaker_config_list = list(
                 yaml.safe_load(self.model.config["bgp-speakers"])
             )
-            for speaker_config in speaker_config_list:
-                self.apply_speaker(registry, speaker_config)
+            try:
+                parsed_speaker_config_list = [
+                    SpeakerConfig(**d) for d in raw_speaker_config_list
+                ]
+                for speaker_config in parsed_speaker_config_list:
+                    self.apply_speaker(registry, speaker_config.dict(by_alias=True))
+            except ValidationError as e:
+                log.error(f"Error validating bgp-speakers config: {e}")
+                self.unit.status = BlockedStatus("Error validating bgp-speakers config")
 
     def get_registry(self):
         registry = self.model.config["image-registry"]
