@@ -345,8 +345,8 @@ async def grafana_app(ops_test, k8s_model):
         log.info("Deploying grafana-k8s ...")
         await m.deploy(entity_url="grafana-k8s", trust=True, channel="edge")
 
-        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60)
-        await m.wait_for_idle(status="active")
+        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60 * 5)
+        await m.wait_for_idle(status="active", timeout=60 * 5)
 
     yield "grafana-k8s"
 
@@ -469,11 +469,11 @@ async def prometheus_app(ops_test, k8s_model):
         log.info("Deploying prometheus-k8s ...")
         await m.deploy(entity_url="prometheus-k8s", trust=True, channel="edge")
 
-        await m.block_until(lambda: "prometheus-k8s" in m.applications, timeout=60 * 3)
+        await m.block_until(lambda: "prometheus-k8s" in m.applications, timeout=60 * 5)
         await m.wait_for_idle(
             apps=["prometheus-k8s"],
             status="active",
-            timeout=60 * 3,
+            timeout=60 * 5,
             raise_on_error=False,
         )
 
