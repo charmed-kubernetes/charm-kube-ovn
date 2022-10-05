@@ -12,7 +12,6 @@ import pytest
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
 import ops.framework
-from ops.testing import Harness
 
 from charm import KubeOvnCharm
 
