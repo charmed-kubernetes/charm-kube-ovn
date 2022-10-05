@@ -151,7 +151,7 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
     # ping once before the test, as the first ping delay takes a bit,
     # but subsequent pings work as expected
     # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+    await ping(kubectl_exec, pinger, pingee, namespace)
 
     # latency is in ms
     expected_latency = 1000
