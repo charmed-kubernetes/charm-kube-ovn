@@ -143,7 +143,7 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
         before=before_log(log, logging.INFO),
     )
     async def ping_for_latency(latency):
-        log.info("Testing ping latency ...")
+        log.info(f"Testing that ping latency == {latency} ...")
         stdout = await ping(kubectl_exec, pinger, pingee, namespace)
         average_latency = avg_ping_delay(stdout)
         assert isclose(average_latency, latency, rel_tol=0.05)
