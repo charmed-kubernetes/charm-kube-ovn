@@ -175,6 +175,7 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
 
 async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
     isolated_pod, allowed_pod = isolated_subnet
+
     stdout = await ping(
         kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
@@ -197,6 +198,11 @@ async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource
         obj=subnet,
         patch_type=PatchType.MERGE,
         force=True,
+    )
+
+    # Ping to update the ARP cache
+    stdout = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
 
     stdout = await ping(
@@ -266,13 +272,14 @@ async def test_gateway_qos(
 
 async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
     isolated_pod, allowed_pod = isolated_subnet
+
     stdout = await ping(
         kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
     actual_loss = ping_loss(stdout)
     assert actual_loss == 100
 
-    log.info("Patching Subnet (allow 10.17.0.0/16 subnet) ...")
+    log.info("Patching Subnet (allow 10.17.0.0/16 subnet)...")
     subnet = client.get(subnet_resource, "isolated-subnet")
     subnet.spec["allowSubnets"] = ["10.17.0.0/16"]
     client.patch(
@@ -281,6 +288,11 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
         obj=subnet,
         patch_type=PatchType.MERGE,
         force=True,
+    )
+
+    # Ping to update the ARP cache
+    stdout = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
 
     stdout = await ping(

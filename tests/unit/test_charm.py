@@ -12,6 +12,7 @@ import pytest
 from ops.model import ActiveStatus, MaintenanceStatus, WaitingStatus, ModelError
 import ops.testing
 import ops.framework
+from ops.testing import Harness
 
 from charm import KubeOvnCharm
 
@@ -207,7 +208,7 @@ def test_is_kubeconfig_available(harness, charm):
     assert not charm.is_kubeconfig_available()
 
     harness.update_relation_data(
-        rel_id, "kubernetes-control-plane/0", {"kubeconfig-hash": 1234}
+        rel_id, "kubernetes-control-plane/0", {"kubeconfig-hash": "1234"}
     )
     assert charm.is_kubeconfig_available()
 
