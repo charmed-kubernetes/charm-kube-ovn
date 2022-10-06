@@ -323,7 +323,9 @@ async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
         *shlex.split(juju_cmd),
         check=False,
     )
+    log.info(f"retcode:\n{retcode}")
     log.info(f"stdout:\n{stdout}")
+    log.info(f"stderr:\n{stderr}")
 
     # Timeout return code is 124 when command times out
     if retcode == 124:
