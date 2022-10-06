@@ -15,6 +15,7 @@ from ops.main import main
 from ops.model import (
     ActiveStatus,
     WaitingStatus,
+    BlockedStatus,
     MaintenanceStatus,
     ModelError,
 )
@@ -75,7 +76,7 @@ class KubeOvnCharm(CharmBase):
         key = "command" if command else "args"
         container_args = container.setdefault(key, [])
         for k, v in args.items():
-            container_args.append(k + "=" + v)
+            container_args.append(k + "=" + str(v))
 
     def apply_crds(self):
         self.unit.status = MaintenanceStatus("Applying CRDs")
@@ -118,6 +119,8 @@ class KubeOvnCharm(CharmBase):
         node_switch_cidr = self.model.config["node-switch-cidr"]
         node_switch_gateway = self.model.config["node-switch-gateway"]
         node_ips = self.get_ovn_node_ips()
+        enable_global_mirror = self.model.config["enable-global-mirror"]
+        mirror_iface = self.model.config["mirror-iface"]
 
         self.replace_images(resources, registry)
 
@@ -148,8 +151,21 @@ class KubeOvnCharm(CharmBase):
         cni_server_container = self.get_container_resource(
             kube_ovn_cni, container_name="cni-server"
         )
-        self.replace_container_args(
-            cni_server_container, args={"--service-cluster-ip-range": service_cidr}
+
+        cni_args_to_replace = {"--service-cluster-ip-range": service_cidr}
+        if enable_global_mirror and not mirror_iface:
+            log.error("If enable-global-mirror is true, mirror-iface must be set")
+            self.unit.status = BlockedStatus(
+                "If enable-global-mirror is true, mirror-iface must be set"
+            )
+        else:
+            cni_args_to_replace["--enable-mirror"] = enable_global_mirror
+        self.replace_container_args(cni_server_container, args=cni_args_to_replace)
+
+        cni_args_to_add = {"--mirror-iface": mirror_iface}
+        self.add_container_args(
+            cni_server_container,
+            args=cni_args_to_add,
         )
 
         kube_ovn_pinger = self.get_resource(
@@ -460,12 +476,12 @@ class KubeOvnCharm(CharmBase):
             key = arg.split("=")[0]
             value = args.get(key)
             if value is not None:  # allow for non-truthy values
-                container_command[i] = key + "=" + value
+                container_command[i] = key + "=" + str(value)
         for i, arg in enumerate(container_args):
             key = arg.split("=")[0]
             value = args.get(key)
             if value is not None:  # allow for non-truthy values
-                container_args[i] = key + "=" + value
+                container_args[i] = key + "=" + str(value)
 
     def replace_container_env_vars(self, container, env_vars):
         for env_var in container["env"]:

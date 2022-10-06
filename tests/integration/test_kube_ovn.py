@@ -17,6 +17,7 @@ from tenacity import (
     stop_after_attempt,
     stop_after_delay,
     wait_fixed,
+    before_log,
 )
 
 
@@ -304,6 +305,75 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert len(iface_addrs["net1"]) == 1
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
+
+
+class TCPDumpError(Exception):
+    pass
+
+
+@retry(
+    retry=retry_if_exception_type(TCPDumpError),
+    stop=stop_after_delay(60 * 10),
+    wait=wait_fixed(1),
+    before=before_log(log, logging.INFO),
+)
+async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
+    juju_cmd = f"ssh {unit.name} -- sudo timeout 5 tcpdump -ni {interface}"
+    retcode, stdout, stderr = await ops_test.juju(
+        *shlex.split(juju_cmd),
+        check=False,
+    )
+
+    # Timeout return code is 124 when command times out
+    if retcode == 124:
+        # Last 3 lines of stdout look like this:
+        # 0 packets captured
+        # 0 packets received by filter
+        # 0 packets dropped by kernel
+        captured = int(stdout.split("\n")[-3].split(" ")[0])
+        if capture_comparator(captured):
+            log.info(f"Comparison succeeded. Number of packets captured: {captured}")
+            return True
+        else:
+            msg = f"Comparison failed. Number of packets captured: {captured}"
+            log.info(msg)
+            log.info(f"stdout:\n{stdout}")
+            raise TCPDumpError(msg)
+    else:
+        msg = f"Failed to execute sudo timeout tcpdump -ni {interface} on {unit.name}"
+        log.info(msg)
+        raise TCPDumpError(msg)
+
+
+async def test_global_mirror(ops_test):
+    kube_ovn_app = ops_test.model.applications["kube-ovn"]
+    worker_app = ops_test.model.applications["kubernetes-worker"]
+    worker_unit = worker_app.units[0]
+    mirror_iface = "mirror0"
+    # Test once before configuring the mirror, 0 packets should be captured
+    assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x == 0)
+
+    # Configure and test that traffic is being captured (more than 0 captured)
+    # Note this will be retried a few times, as it takes a bit of time for the newly configured daemonset
+    # to get restarted
+    log.info("Enabling global mirror ...")
+    await kube_ovn_app.set_config(
+        {
+            "enable-global-mirror": "true",
+            "mirror-iface": mirror_iface,
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x > 0)
+
+    log.info("Disabling global mirror ...")
+    await kube_ovn_app.set_config(
+        {
+            "enable-global-mirror": "false",
+            "mirror-iface": mirror_iface,
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
 
 class iPerfError(Exception):

@@ -19,6 +19,17 @@ options:
     default: "kube-ovn-grafana-agent"
     description: |
       Default namespace for the grafana agent deployment (This value cannot be changed after deployment).
+  enable-global-mirror:
+    type: boolean
+    default: false
+    description: |
+      Enable global traffic mirroring. If set to true, the mirror-iface config must also be set.
+  mirror-iface:
+    type: string
+    default: "mirror0"
+    description: |
+      Network interface to mirror traffic to. Only used when enable-global-mirror=true, 
+      or when pods have been annotated with the ovn.kubernetes.io/mirror: "true" annotation.
   node-switch-cidr:
     type: string
     default: "100.64.0.0/16"
