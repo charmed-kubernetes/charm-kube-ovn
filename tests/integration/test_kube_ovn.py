@@ -333,12 +333,18 @@ async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
         # 0 packets captured
         # 0 packets received by filter
         # 0 packets dropped by kernel
-        captured = int(stdout.split("\n")[-3].split(" ")[0])
-        if capture_comparator(captured):
-            log.info(f"Comparison succeeded. Number of packets captured: {captured}")
-            return True
+        if stdout:
+            captured = int(stdout.split("\n")[-3].split(" ")[0])
+            if capture_comparator(captured):
+                log.info(f"Comparison succeeded. Number of packets captured: {captured}")
+                return True
+            else:
+                msg = f"Comparison failed. Number of packets captured: {captured}"
+                log.info(msg)
+                log.info(f"stdout:\n{stdout}")
+                raise TCPDumpError(msg)
         else:
-            msg = f"Comparison failed. Number of packets captured: {captured}"
+            msg = f"Stdout was empty"
             log.info(msg)
             log.info(f"stdout:\n{stdout}")
             raise TCPDumpError(msg)
