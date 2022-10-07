@@ -21,7 +21,6 @@ from random import choices
 from string import ascii_lowercase, digits
 from typing import Union, Tuple
 
-from asyncio.timeouts import timeout
 
 log = logging.getLogger(__name__)
 
