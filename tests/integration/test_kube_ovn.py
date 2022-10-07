@@ -323,30 +323,31 @@ async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
         *shlex.split(juju_cmd),
         check=False,
     )
-    log.info(f"retcode:\n{retcode}")
-    log.info(f"stdout:\n{stdout}")
-    log.info(f"stderr:\n{stderr}")
 
+    # In GH actions, the output is in stderr and stdout is empty, so combine them
+    output = stdout + stderr
     # Timeout return code is 124 when command times out
     if retcode == 124:
         # Last 3 lines of stdout look like this:
         # 0 packets captured
         # 0 packets received by filter
         # 0 packets dropped by kernel
-        if stdout:
-            captured = int(stdout.split("\n")[-3].split(" ")[0])
+        if output:
+            captured = int(output.split("\n")[-3].split(" ")[0])
             if capture_comparator(captured):
-                log.info(f"Comparison succeeded. Number of packets captured: {captured}")
+                log.info(
+                    f"Comparison succeeded. Number of packets captured: {captured}"
+                )
                 return True
             else:
                 msg = f"Comparison failed. Number of packets captured: {captured}"
                 log.info(msg)
-                log.info(f"stdout:\n{stdout}")
                 raise TCPDumpError(msg)
         else:
-            msg = f"Stdout was empty"
+            msg = "output was empty"
             log.info(msg)
             log.info(f"stdout:\n{stdout}")
+            log.info(f"stderr:\n{stderr}")
             raise TCPDumpError(msg)
     else:
         msg = f"Failed to execute sudo timeout tcpdump -ni {interface} on {unit.name}"
