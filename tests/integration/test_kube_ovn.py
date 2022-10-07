@@ -132,45 +132,60 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     assert prior_bw > non_prior_bw
 
 
-async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
+async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
+
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
+    async def ping_for_latency(latency):
+        log.info(f"Testing that ping latency == {latency} ...")
+        stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+        average_latency = avg_ping_delay(stdout)
+        assert isclose(average_latency, latency, rel_tol=0.05)
 
     # ping once before the test, as the first ping delay takes a bit,
     # but subsequent pings work as expected
     # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+    await ping(kubectl_exec, pinger, pingee, namespace)
 
     # latency is in ms
-    latency = 1000
-    latency_annotation = {"ovn.kubernetes.io/latency": f"{latency}"}
-    await annotate_obj(client, pinger, latency_annotation)
+    expected_latency = 1000
+    latency_annotation = {"ovn.kubernetes.io/latency": f"{expected_latency}"}
+    annotate(pinger, latency_annotation)
 
-    log.info("Testing ping latency ...")
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
-    average_latency = avg_ping_delay(stdout)
-    assert isclose(average_latency, latency, rel_tol=0.05)
+    await ping_for_latency(expected_latency)
 
 
-async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
+async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods, annotate):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
+    async def ping_for_loss(loss):
+        log.info(f"Testing that ping loss == {loss} ...")
+        stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+        actual_loss = ping_loss(stdout)
+        assert actual_loss == loss
+
     # Test loss before applying the annotation
-    log.info("Testing ping loss ...")
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == 0
+    await ping_for_loss(0)
 
     # Annotate and test again
     expected_loss = 100
     loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
-    await annotate_obj(client, pinger, loss_annotation)
+    annotate(pinger, loss_annotation)
 
-    log.info("Testing ping loss ...")
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == expected_loss
+    await ping_for_loss(expected_loss)
 
 
 async def test_pod_netem_limit(ops_test, client, iperf3_pods):
