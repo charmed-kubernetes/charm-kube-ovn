@@ -339,8 +339,8 @@ async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
         check=False,
     )
 
-    # In GH actions, the output is in stderr and stdout is empty, so combine them
-    output = stdout + stderr
+    # In GH actions, the output is in stderr and stdout is empty
+    output = stdout or stderr
     # Timeout return code is 124 when command times out
     if retcode == 124:
         # Last 3 lines of stdout look like this:
