@@ -122,26 +122,45 @@ def gateway_client_pod(client, worker_node, subnet_resource):
         client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
 
 
+async def wait_pod_ip(client, pod):
+    for _, obj in client.watch(
+        Pod,
+        namespace=pod.metadata.namespace,
+        fields={"metadata.name": pod.metadata.name},
+    ):
+        if obj.status.podIP:
+            return obj
+
+
 @pytest.fixture()
-async def isolated_subnet(client: Client):
+async def isolated_subnet(client, subnet_resource):
     log.info("Creating isolated subnet resources ...")
     path = Path("tests/data/isolated-subnet.yaml")
     for obj in codecs.load_all_yaml(path.read_text()):
         client.create(obj)
-    # Wait for the subnet and pods to become stable.
-    await asyncio.sleep(60)
-    pods = [
+    subnets = [
+        client.get(subnet_resource, name="isolated-subnet"),
+        client.get(subnet_resource, name="allowed-subnet"),
+    ]
+    log.info("Waiting for subnets...")
+    for sn in subnets:
+        client.wait(subnet_resource, sn.metadata.name, for_conditions=["Ready"])
+
+    watch = [
         client.get(Pod, name="isolated-pod", namespace="isolated"),
         client.get(Pod, name="allowed-pod", namespace="allowed"),
     ]
 
-    for pod in pods:
+    pods = []
+    log.info("Waiting for pods...")
+    for pod in watch:
         client.wait(
             Pod,
             pod.metadata.name,
             for_conditions=["Ready"],
             namespace=pod.metadata.namespace,
         )
+        pods.append(await wait_pod_ip(client, pod))
 
     yield tuple(pods)
 
@@ -155,13 +174,13 @@ async def isolated_subnet(client: Client):
         while len(remaining_pods) != 0:
             log.info("Isolated pods still in existence, waiting ...")
             remaining_pods = list(client.list(Pod, namespace=namespace))
-            time.sleep(5)
+            await asyncio.sleep(5)
 
     for pod in pods:
         namespace = pod.metadata.namespace
         while namespace in list(client.list(Namespace)):
             log.info(f"{namespace} namespace still in existence, waiting ...")
-            time.sleep(5)
+            await asyncio.sleep(5)
 
 
 @pytest.fixture()

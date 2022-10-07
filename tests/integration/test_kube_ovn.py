@@ -192,11 +192,21 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
 async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
     isolated_pod, allowed_pod = isolated_subnet
 
-    stdout = await ping(
-        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
     )
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == 100
+    async def check_ping(loss):
+        log.info(f"Pinging pod. Loss == {loss}")
+        stdout = await ping(
+            kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+        )
+        actual_loss = ping_loss(stdout)
+        assert actual_loss == loss
+
+    await check_ping(100)
 
     log.info("Patching subnet with ACL rules ...")
     subnet = client.get(subnet_resource, "isolated-subnet")
@@ -221,12 +231,7 @@ async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource
         kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
 
-    stdout = await ping(
-        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
-    )
-
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == 0
+    await check_ping(0)
 
 
 async def test_pod_netem_limit(ops_test, client, iperf3_pods):
@@ -289,11 +294,21 @@ async def test_gateway_qos(
 async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
     isolated_pod, allowed_pod = isolated_subnet
 
-    stdout = await ping(
-        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
     )
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == 100
+    async def check_ping(loss):
+        log.info(f"Pinging pod. Loss == {loss}")
+        stdout = await ping(
+            kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+        )
+        actual_loss = ping_loss(stdout)
+        assert actual_loss == loss
+
+    await check_ping(100)
 
     log.info("Patching Subnet (allow 10.17.0.0/16 subnet)...")
     subnet = client.get(subnet_resource, "isolated-subnet")
@@ -311,12 +326,7 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
         kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
 
-    stdout = await ping(
-        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
-    )
-
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == 0
+    await check_ping(0)
 
 
 async def test_grafana(
