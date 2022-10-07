@@ -347,23 +347,24 @@ async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
         # 0 packets captured
         # 0 packets received by filter
         # 0 packets dropped by kernel
-        if output:
-            captured = int(output.split("\n")[-3].split(" ")[0])
-            if capture_comparator(captured):
-                log.info(
-                    f"Comparison succeeded. Number of packets captured: {captured}"
-                )
-                return True
-            else:
-                msg = f"Comparison failed. Number of packets captured: {captured}"
-                log.info(msg)
-                raise TCPDumpError(msg)
-        else:
-            msg = "output was empty"
-            log.info(msg)
-            log.info(f"stdout:\n{stdout}")
-            log.info(f"stderr:\n{stderr}")
-            raise TCPDumpError(msg)
+        for line in output.split("\n"):
+            if "packets captured" in line:
+                captured = int(line.split(" ")[0])
+                if capture_comparator(captured):
+                    log.info(
+                        f"Comparison succeeded. Number of packets captured: {captured}"
+                    )
+                    return True
+                else:
+                    msg = f"Comparison failed. Number of packets captured: {captured}"
+                    log.info(msg)
+                    raise TCPDumpError(msg)
+
+        msg = "output did not contain the number of packets captured"
+        log.info(msg)
+        log.info(f"stdout:\n{stdout}")
+        log.info(f"stderr:\n{stderr}")
+        raise TCPDumpError(msg)
     else:
         msg = f"Failed to execute sudo timeout tcpdump -ni {interface} on {unit.name}"
         log.info(msg)
