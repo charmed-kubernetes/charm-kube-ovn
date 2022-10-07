@@ -227,7 +227,7 @@ async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource
     )
 
     # Ping to update the ARP cache
-    stdout = await ping(
+    _ = await ping(
         kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
 
@@ -322,7 +322,7 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
     )
 
     # Ping to update the ARP cache
-    stdout = await ping(
+    _ = await ping(
         kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
     )
 
