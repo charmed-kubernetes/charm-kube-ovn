@@ -13,6 +13,7 @@ import re
 from ipaddress import ip_address, ip_network
 from lightkube.types import PatchType
 from tenacity import (
+    before_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -132,7 +133,7 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     assert prior_bw > non_prior_bw
 
 
-async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
+async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -156,12 +157,12 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
     # latency is in ms
     expected_latency = 1000
     latency_annotation = {"ovn.kubernetes.io/latency": f"{expected_latency}"}
-    annotate(pinger, latency_annotation)
+    await annotate_obj(client, pinger, latency_annotation)
 
     await ping_for_latency(expected_latency)
 
 
-async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods, annotate):
+async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -183,7 +184,7 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods, annotate):
     # Annotate and test again
     expected_loss = 100
     loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
-    annotate(pinger, loss_annotation)
+    await annotate_obj(client, pinger, loss_annotation)
 
     await ping_for_loss(expected_loss)
 
