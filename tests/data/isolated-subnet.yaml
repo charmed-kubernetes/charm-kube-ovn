@@ -1,0 +1,67 @@
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: isolated
+  labels:
+    name: isolated
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: allowed
+  labels:
+    name: allowed
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: isolated-subnet
+spec:
+  protocol: IPv4
+  default: false
+  namespaces:
+  - isolated
+  cidrBlock: 10.16.0.0/16
+  gateway: 10.16.0.1
+  private: true
+  gatewayType: distributed
+  natOutgoing: true
+---
+apiVersion: kubeovn.io/v1
+kind: Subnet
+metadata:
+  name: allowed-subnet
+spec:
+  protocol: IPv4
+  default: false
+  namespaces:
+  - allowed
+  cidrBlock: 10.17.0.0/16
+  gateway: 10.17.0.1
+  private: false
+  gatewayType: distributed
+  natOutgoing: false
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: isolated-pod
+  annotations:
+    ovn.kubernetes.io/logical_switch: isolated-subnet
+  namespace: isolated
+spec:
+  containers:
+      - name: nginx
+        image: rocks.canonical.com/cdk/kubeovn/perf:latest
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: allowed-pod
+  annotations:
+    ovn.kubernetes.io/logical_switch: allowed-subnet
+  namespace: allowed
+spec:
+  containers:
+      - name: nginx
+        image: rocks.canonical.com/cdk/kubeovn/perf:latest

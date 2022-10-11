@@ -11,7 +11,9 @@ import json
 import re
 
 from ipaddress import ip_address, ip_network
+from lightkube.types import PatchType
 from tenacity import (
+    before_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
@@ -135,41 +137,101 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
+    async def ping_for_latency(latency):
+        log.info(f"Testing that ping latency == {latency} ...")
+        stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+        average_latency = avg_ping_delay(stdout)
+        assert isclose(average_latency, latency, rel_tol=0.05)
+
     # ping once before the test, as the first ping delay takes a bit,
     # but subsequent pings work as expected
     # https://wiki.linuxfoundation.org/networking/netem#how_come_first_ping_takes_longer
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+    await ping(kubectl_exec, pinger, pingee, namespace)
 
     # latency is in ms
-    latency = 1000
-    latency_annotation = {"ovn.kubernetes.io/latency": f"{latency}"}
+    expected_latency = 1000
+    latency_annotation = {"ovn.kubernetes.io/latency": f"{expected_latency}"}
     await annotate_obj(client, pinger, latency_annotation)
 
-    log.info("Testing ping latency ...")
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
-    average_latency = avg_ping_delay(stdout)
-    assert isclose(average_latency, latency, rel_tol=0.05)
+    await ping_for_latency(expected_latency)
 
 
 async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
+    async def ping_for_loss(loss):
+        log.info(f"Testing that ping loss == {loss} ...")
+        stdout = await ping(kubectl_exec, pinger, pingee, namespace)
+        actual_loss = ping_loss(stdout)
+        assert actual_loss == loss
+
     # Test loss before applying the annotation
-    log.info("Testing ping loss ...")
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == 0
+    await ping_for_loss(0)
 
     # Annotate and test again
     expected_loss = 100
     loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
     await annotate_obj(client, pinger, loss_annotation)
 
-    log.info("Testing ping loss ...")
-    stdout = await ping(kubectl_exec, pinger, pingee, namespace)
-    actual_loss = ping_loss(stdout)
-    assert actual_loss == expected_loss
+    await ping_for_loss(expected_loss)
+
+
+async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
+    isolated_pod, allowed_pod = isolated_subnet
+
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
+    async def check_ping(loss):
+        log.info(f"Pinging pod. Loss == {loss}")
+        stdout = await ping(
+            kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+        )
+        actual_loss = ping_loss(stdout)
+        assert actual_loss == loss
+
+    await check_ping(100)
+
+    log.info("Patching subnet with ACL rules ...")
+    subnet = client.get(subnet_resource, "isolated-subnet")
+    subnet.spec["acls"] = [
+        {
+            "action": "allow",
+            "direction": "to-lport",
+            "match": f"ip4.src=={allowed_pod.status.podIP} && ip4.dst=={isolated_pod.status.podIP}",
+            "priority": 2222,
+        }
+    ]
+    client.patch(
+        subnet_resource,
+        "isolated-subnet",
+        obj=subnet,
+        patch_type=PatchType.MERGE,
+        force=True,
+    )
+
+    # Ping to update the ARP cache
+    _ = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    )
+
+    await check_ping(0)
 
 
 async def test_pod_netem_limit(ops_test, client, iperf3_pods):
@@ -227,6 +289,44 @@ async def test_gateway_qos(
         kubectl_exec, gateway_server, gateway_client_pod, namespace
     )
     assert isclose(egress_bw, 30, rel_tol=0.10)
+
+
+async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_resource):
+    isolated_pod, allowed_pod = isolated_subnet
+
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
+    async def check_ping(loss):
+        log.info(f"Pinging pod. Loss == {loss}")
+        stdout = await ping(
+            kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+        )
+        actual_loss = ping_loss(stdout)
+        assert actual_loss == loss
+
+    await check_ping(100)
+
+    log.info("Patching Subnet (allow 10.17.0.0/16 subnet)...")
+    subnet = client.get(subnet_resource, "isolated-subnet")
+    subnet.spec["allowSubnets"] = ["10.17.0.0/16"]
+    client.patch(
+        subnet_resource,
+        "isolated-subnet",
+        obj=subnet,
+        patch_type=PatchType.MERGE,
+        force=True,
+    )
+
+    # Ping to update the ARP cache
+    _ = await ping(
+        kubectl_exec, allowed_pod, isolated_pod, allowed_pod.metadata.namespace
+    )
+
+    await check_ping(0)
 
 
 async def test_grafana(
