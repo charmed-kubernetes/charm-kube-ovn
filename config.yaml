@@ -1,4 +1,17 @@
 options:
+  bgp-speakers:
+    type: string
+    default: ""
+    description: |
+      YAML defining a list of speaker configurations. Multiple speakers can be defined as separate list entries
+      Example:
+      - name: my-speaker
+        node-selector: juju-application=kubernetes-worker
+        neighbor-address: 10.32.32.1
+        neighbor-as: 65030
+        cluster-as: 65000
+        announce-cluster-ip: true
+        log-level: 2
   control-plane-node-label:
     type: string
     default: "juju-application=kubernetes-control-plane"
@@ -19,6 +32,11 @@ options:
     default: "kube-ovn-grafana-agent"
     description: |
       Default namespace for the grafana agent deployment (This value cannot be changed after deployment).
+  image-registry:
+    type: string
+    default: ""
+    description: |
+      Image registry for the kube-ovn image.
   node-switch-cidr:
     type: string
     default: "100.64.0.0/16"
@@ -41,8 +59,3 @@ options:
     default: "google.com"
     description: |
       External DNS hostname used by kube-ovn-pinger for connectivity testing.
-  image-registry:
-    type: string
-    default: ""
-    description: |
-      Image registry for the kube-ovn image.
