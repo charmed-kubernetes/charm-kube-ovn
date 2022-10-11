@@ -1025,7 +1025,7 @@ def test_apply_speaker(
         "log-level": 5,
     }
 
-    parsed_speaker_config_dict = SpeakerConfig(**speaker_dict).dict(by_alias=True)
+    parsed_speaker_config = SpeakerConfig(**speaker_dict)
     (kube_ovn_speaker,) = get_resource.side_effect = [
         mock.MagicMock(),
     ]
@@ -1035,7 +1035,7 @@ def test_apply_speaker(
     ]
 
     # Test Method
-    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, parsed_speaker_config_dict)
+    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, parsed_speaker_config)
 
     # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Speaker resource")
@@ -1091,8 +1091,8 @@ def test_apply_speaker(
         "cluster-as": 65000,
     }
 
-    parsed_speaker_config_dict = SpeakerConfig(**speaker_dict).dict(by_alias=True)
-    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, parsed_speaker_config_dict)
+    parsed_speaker_config = SpeakerConfig(**speaker_dict)
+    charm.apply_speaker(DEFAULT_IMAGE_REGISTRY, parsed_speaker_config)
     add_container_args.assert_called_once_with(
         kube_ovn_speaker_container,
         args={
@@ -1166,17 +1166,17 @@ def test_apply_speakers(remove_speakers, apply_speaker, harness, charm, caplog):
     harness.update_config(config_dict)
     charm.apply_speakers(DEFAULT_IMAGE_REGISTRY)
     remove_speakers.assert_called_once()
-    apply_speaker.assert_called_once_with(
+    apply_speaker(
         DEFAULT_IMAGE_REGISTRY,
-        {
-            "name": "my-speaker",
-            "node-selector": "juju-application=kubernetes-worker",
-            "neighbor-address": IPv4Address("10.32.32.1"),
-            "neighbor-as": 65030,
-            "cluster-as": 65000,
-            "announce-cluster-ip": True,
-            "log-level": 5,
-        },
+        SpeakerConfig.construct(
+            name="my-speaker",
+            node_selector="juju-application=kubernetes-worker",
+            neighbor_address=IPv4Address("10.32.32.1"),
+            neighbor_as=65030,
+            cluster_as=65000,
+            announce_cluster_ip=True,
+            log_level=5,
+        ),
     )
 
     # Try with empty config option

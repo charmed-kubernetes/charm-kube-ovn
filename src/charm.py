@@ -51,7 +51,7 @@ class SpeakerConfig(BaseModel):
     node_selector: str = Field(
         ...,
         alias="node-selector",
-        regex="^[a-zA-Z0-9A-Za-z0-9_./-]+=[a-zA-Z0-9_.-]+$",
+        regex=r"^[\w./-]+=[\w.-]+$",
     )
     neighbor_address: IPvAnyAddress = Field(..., alias="neighbor-address")
     neighbor_as: int = Field(..., alias="neighbor-as", gt=0, lt=65536)
@@ -227,7 +227,7 @@ class KubeOvnCharm(CharmBase):
 
         self.apply_manifest(resources, "ovn.yaml")
 
-    def apply_speaker(self, registry, speaker_config_element):
+    def apply_speaker(self, registry, speaker_config: SpeakerConfig):
         self.unit.status = MaintenanceStatus("Applying Speaker resource")
         resources = self.load_manifest("speaker.yaml")
         speaker = self.get_resource(
@@ -239,26 +239,24 @@ class KubeOvnCharm(CharmBase):
         self.replace_container_args(
             speaker_container,
             args={
-                "--neighbor-address": speaker_config_element["neighbor-address"],
-                "--neighbor-as": speaker_config_element["neighbor-as"],
-                "--cluster-as": speaker_config_element["cluster-as"],
+                "--neighbor-address": speaker_config.neighbor_address,
+                "--neighbor-as": speaker_config.neighbor_as,
+                "--cluster-as": speaker_config.cluster_as,
             },
         )
         self.add_container_args(
             speaker_container,
             args={
-                "--announce-cluster-ip": speaker_config_element.get(
-                    "announce-cluster-ip", False
-                ),
-                "--v": speaker_config_element.get("log-level", 2),
+                "--announce-cluster-ip": speaker_config.announce_cluster_ip,
+                "--v": speaker_config.log_level,
             },
         )
         self.replace_images(resources, registry)
         self.replace_node_selector(
-            speaker, speaker_config_element["node-selector"], "ovn.kubernetes.io/bgp"
+            speaker, speaker_config.node_selector, "ovn.kubernetes.io/bgp"
         )
-        self.replace_name(speaker, speaker_config_element["name"])
-        self.apply_manifest(resources, f"{speaker_config_element['name']}.speaker.yaml")
+        self.replace_name(speaker, speaker_config.name)
+        self.apply_manifest(resources, f"{speaker_config.name}.speaker.yaml")
 
     def remove_speakers(self):
         log.info("Cleaning up any existing speakers ...")
@@ -347,7 +345,7 @@ class KubeOvnCharm(CharmBase):
                     SpeakerConfig(**d) for d in raw_speaker_config_list
                 ]
                 for speaker_config in parsed_speaker_config_list:
-                    self.apply_speaker(registry, speaker_config.dict(by_alias=True))
+                    self.apply_speaker(registry, speaker_config)
             except ValidationError as e:
                 log.error(f"Error validating bgp-speakers config: {e}")
                 self.unit.status = BlockedStatus("Error validating bgp-speakers config")
