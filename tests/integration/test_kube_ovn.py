@@ -75,7 +75,7 @@ async def test_kubectl_ko_plugin(ops_test):
         )
 
 
-async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
+async def test_pod_network_limits(kubectl_exec, client, iperf3_pods, annotate):
     server, test_pod, _ = iperf3_pods
     namespace = server.metadata.namespace
 
@@ -83,7 +83,7 @@ async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
         "ovn.kubernetes.io/ingress_rate": "10",
         "ovn.kubernetes.io/egress_rate": "5",
     }
-    await annotate_obj(client, test_pod, rate_values)
+    annotate(test_pod, rate_values)
 
     log.info("Test ingress bandwidth...")
     ingress_bw = await run_bandwidth_test(kubectl_exec, server, test_pod, namespace)
@@ -97,7 +97,7 @@ async def test_pod_network_limits(kubectl_exec, client, iperf3_pods):
 
 
 @pytest.mark.skip
-async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
+async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods, annotate):
     """
     TODO: This test is not working as intended
     and must be fixed.
@@ -113,10 +113,10 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     await kubectl_exec(*args, fail_msg="Failed to setup iperf3 servers")
 
     new_priority_annotation = {"ovn.kubernetes.io/priority": f"{NEW_PRIORITY_HTB}"}
-    await annotate_obj(client, pod_prior, new_priority_annotation)
+    annotate(pod_prior, new_priority_annotation)
 
     low_priority_annotation = {"ovn.kubernetes.io/priority": f"{LOW_PRIORITY_HTB}"}
-    await annotate_obj(client, pod_non_prior, low_priority_annotation)
+    annotate(pod_non_prior, low_priority_annotation)
 
     results = await asyncio.gather(
         kubectl_exec(
@@ -133,7 +133,7 @@ async def test_linux_htb_performance(kubectl_exec, client, iperf3_pods):
     assert prior_bw > non_prior_bw
 
 
-async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
+async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods, annotate):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -157,12 +157,13 @@ async def test_pod_netem_latency(kubectl_exec, client, iperf3_pods):
     # latency is in ms
     expected_latency = 1000
     latency_annotation = {"ovn.kubernetes.io/latency": f"{expected_latency}"}
-    await annotate_obj(client, pinger, latency_annotation)
+
+    annotate(pinger, latency_annotation)
 
     await ping_for_latency(expected_latency)
 
 
-async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
+async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods, annotate):
     pinger, pingee, _ = iperf3_pods
     namespace = pinger.metadata.namespace
 
@@ -184,7 +185,7 @@ async def test_pod_netem_loss(kubectl_exec, client, iperf3_pods):
     # Annotate and test again
     expected_loss = 100
     loss_annotation = {"ovn.kubernetes.io/loss": f"{expected_loss}"}
-    await annotate_obj(client, pinger, loss_annotation)
+    annotate(pinger, loss_annotation)
 
     await ping_for_loss(expected_loss)
 
@@ -234,13 +235,13 @@ async def test_acl_subnet(kubectl_exec, isolated_subnet, client, subnet_resource
     await check_ping(0)
 
 
-async def test_pod_netem_limit(ops_test, client, iperf3_pods):
+async def test_pod_netem_limit(ops_test, client, iperf3_pods, annotate):
     expected_limit = 100
     for pod in iperf3_pods:
         # Annotate all the pods so we dont have to worry about
         # which worker node we pick to check the qdisk
         limit_annotation = {"ovn.kubernetes.io/limit": f"{expected_limit}"}
-        await annotate_obj(client, pod, limit_annotation)
+        annotate(pod, limit_annotation)
 
     log.info("Looking for kubernetes-worker/0 netem interface ...")
     juju_cmd = "run --unit kubernetes-worker/0 -- ip link"
@@ -259,7 +260,7 @@ async def test_pod_netem_limit(ops_test, client, iperf3_pods):
 
 
 async def test_gateway_qos(
-    kubectl_exec, client, gateway_server, gateway_client_pod, worker_node
+    kubectl_exec, client, gateway_server, gateway_client_pod, worker_node, annotate
 ):
     namespace = gateway_client_pod.metadata.namespace
 
@@ -268,7 +269,7 @@ async def test_gateway_qos(
         "ovn.kubernetes.io/egress_rate": "30",
     }
 
-    await annotate_obj(client, worker_node, rate_annotations)
+    annotate(worker_node, rate_annotations)
 
     # We need to wait a little bit for OVN to do its thing
     # after applying the annotations
@@ -486,6 +487,44 @@ async def test_global_mirror(ops_test):
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
 
+class BGPError(Exception):
+    pass
+
+
+@retry(
+    retry=retry_if_exception_type(BGPError),
+    stop=stop_after_delay(60 * 10),
+    wait=wait_fixed(1),
+    before=before_log(log, logging.INFO),
+)
+async def run_bird_curl_test(ops_test, unit, ip_to_curl):
+    retcode, stdout, stderr = await ops_test.run(
+        "juju",
+        "ssh",
+        "-m",
+        ops_test.model_full_name,
+        unit.name,
+        "curl",
+        "--connect-timeout",
+        "5",
+        ip_to_curl,
+    )
+    if retcode == 0:
+        return True
+    else:
+        raise BGPError(f"failed to reach {ip_to_curl} from {unit.name}")
+
+
+@pytest.mark.usefixtures("bird")
+async def test_bgp(ops_test, ips_to_curl):
+    log.info("Verifying the following IPs are reachable from bird units ...")
+    log.info(ips_to_curl)
+    bird_app = ops_test.model.applications["bird"]
+    for unit in bird_app.units:
+        for ip in ips_to_curl:
+            assert await run_bird_curl_test(ops_test, unit, ip)
+
+
 class iPerfError(Exception):
     pass
 
@@ -631,11 +670,3 @@ def parse_tc_show(stdout):
     # Limit value directly follows the string limit
     limit_value = netem_split[limit_index + 1]
     return int(limit_value)
-
-
-async def annotate_obj(client, obj, annotation_dict):
-    log.info(f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ...")
-    obj.metadata.annotations = annotation_dict
-    client.patch(
-        type(obj), obj.metadata.name, obj, namespace=obj.metadata.namespace, force=True
-    )

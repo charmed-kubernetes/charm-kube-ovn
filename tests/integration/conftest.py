@@ -16,7 +16,10 @@ from lightkube.resources.apps_v1 import DaemonSet
 from lightkube.resources.core_v1 import Pod
 from lightkube.resources.core_v1 import Namespace
 from lightkube.resources.core_v1 import Node
+from lightkube.resources.apps_v1 import Deployment
+from lightkube.resources.core_v1 import Service
 from lightkube.generic_resource import create_global_resource
+from lightkube.types import PatchType
 from random import choices
 from string import ascii_lowercase, digits
 from typing import Union, Tuple
@@ -636,3 +639,163 @@ async def expected_prometheus_metrics():
         metrics = json.load(file)["data"]
 
     return metrics
+
+
+@pytest_asyncio.fixture(scope="module")
+async def nginx(client):
+    log.info("Creating Nginx deployment and service ...")
+    path = Path("tests/data/nginx.yaml")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.create(obj, namespace="default")
+
+    log.info("Waiting for Nginx deployment to be available ...")
+    client.wait(Deployment, "nginx", for_conditions=["Available"])
+    log.info("Nginx deployment is now available")
+    yield
+
+    log.info("Deleting Nginx deployment and service ...")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(type(obj), obj.metadata.name)
+
+
+@pytest_asyncio.fixture(scope="module")
+async def nginx_cluster_ip(client, nginx):
+    log.info("Getting Nginx service IP ...")
+    svc = client.get(Service, name="nginx", namespace="default")
+    return svc.spec.clusterIP
+
+
+@pytest_asyncio.fixture(scope="module")
+async def nginx_pods(client, nginx):
+    def f():
+        pods = client.list(Pod, namespace="default", labels={"app": "nginx"})
+        return pods
+
+    return f
+
+
+@pytest.fixture()
+def default_subnet(client, subnet_resource):
+    def f():
+        subnet = client.get(subnet_resource, name="ovn-default")
+        return subnet
+
+    return f
+
+
+@pytest_asyncio.fixture(scope="module")
+async def bird(ops_test):
+    await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=3)
+    await ops_test.model.block_until(
+        lambda: "bird" in ops_test.model.applications, timeout=60
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    log.info("Bird deployment complete")
+
+    bird_app = ops_test.model.applications["bird"]
+    kube_ovn_app = ops_test.model.applications["kube-ovn"]
+    worker_app = ops_test.model.applications["kubernetes-worker"]
+
+    log.info("Configuring Kube-OVN to peer with Bird")
+    await kube_ovn_app.set_config(
+        {
+            "bgp-speakers": yaml.dump(
+                [
+                    {
+                        "name": f'test-speaker-{bird_unit.name.replace("/", "-")}',
+                        "node-selector": f"kubernetes.io/hostname={worker_unit.machine.hostname}",
+                        "neighbor-address": bird_unit.public_address,
+                        "neighbor-as": 64512,
+                        "cluster-as": 64512,
+                        "announce-cluster-ip": True,
+                        "log-level": 5,
+                    }
+                    for (bird_unit, worker_unit) in zip(
+                        bird_app.units, worker_app.units
+                    )
+                ]
+            )
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    log.info("Configuring Bird to peer with Kube-OVN")
+    await bird_app.set_config(
+        {
+            "bgp-peers": yaml.dump(
+                [
+                    {"address": unit.public_address, "as-number": 64512}
+                    for unit in worker_app.units
+                ]
+            )
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    yield
+
+    log.info("Setting empty bgp-speakers config ...")
+    await kube_ovn_app.set_config(
+        {
+            "bgp-speakers": "",
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    cmd = "remove-application bird --force"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    log.info(stdout)
+    log.info(stderr)
+    assert rc == 0
+    await ops_test.model.block_until(
+        lambda: "bird" not in ops_test.model.applications, timeout=60 * 10
+    )
+
+
+@pytest_asyncio.fixture(params=["pods", "subnet", "service"])
+async def ips_to_curl(request, nginx_pods, nginx_cluster_ip, annotate, kubectl):
+    if request.param == "pods":
+        for nginx_pod in nginx_pods():
+            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
+        log.info("Using annotated pod IPs ...")
+        yield [pod.status.podIP for pod in nginx_pods()]
+        for nginx_pod in nginx_pods():
+            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
+
+    if request.param == "subnet":
+        # For some reason lightkube is having trouble annotating the custom subnet resource, so using kubectl instead
+        # Lightkube doesn't fail, it just doesn't seem to apply the annotation
+        shcmd = (
+            "annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true"
+        )
+        log.info("Annotating default subnet with ovn.kubernetes.io/bgp=true ...")
+        await kubectl(*shlex.split(shcmd))
+        log.info("Using annotated subnet pod IPs ...")
+        yield [pod.status.podIP for pod in nginx_pods()]
+        log.info("Removing ovn.kubernetes.io/bgp annotation from default subnet ...")
+        shcmd = "annotate subnet ovn-default ovn.kubernetes.io/bgp- --overwrite=true"
+        await kubectl(*shlex.split(shcmd))
+
+    if request.param == "service":
+        log.info("Using service IP ...")
+        yield [nginx_cluster_ip]
+
+
+@pytest.fixture(scope="module")
+def annotate(client, ops_test):
+    def f(obj, annotation_dict, patch_type=PatchType.STRATEGIC):
+        log.info(
+            f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ..."
+        )
+        obj.metadata.annotations = annotation_dict
+        client.patch(
+            type(obj),
+            obj.metadata.name,
+            obj,
+            namespace=obj.metadata.namespace,
+            patch_type=patch_type,
+        )
+
+    return f

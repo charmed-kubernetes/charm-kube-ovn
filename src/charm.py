@@ -24,6 +24,13 @@ from charms.prometheus_k8s.v0.prometheus_remote_write import (
     PrometheusRemoteWriteConsumer,
 )
 
+from pydantic import (
+    BaseModel,
+    IPvAnyAddress,
+    ValidationError,
+    Field,
+)
+
 log = logging.getLogger(__name__)
 
 PLUGINS_PATH = "/usr/local/bin"
@@ -34,6 +41,23 @@ PROMETHEUS_RESOURCES = [
     {"kind": "deployment", "name": "kube-ovn-controller", "port": 10660},
     {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
 ]
+
+
+class SpeakerConfig(BaseModel):
+    name: str = Field(
+        ...,
+        regex="^[a-z0-9.-]+$",
+    )
+    node_selector: str = Field(
+        ...,
+        alias="node-selector",
+        regex=r"^[\w./-]+=[\w.-]+$",
+    )
+    neighbor_address: IPvAnyAddress = Field(..., alias="neighbor-address")
+    neighbor_as: int = Field(..., alias="neighbor-as", gt=0, lt=65536)
+    cluster_as: int = Field(..., alias="cluster-as", gt=0, lt=65536)
+    announce_cluster_ip: bool = Field(False, alias="announce-cluster-ip")
+    log_level: int = Field(2, alias="log-level", gt=-1)
 
 
 class KubeOvnCharm(CharmBase):
@@ -182,7 +206,11 @@ class KubeOvnCharm(CharmBase):
         kube_ovn_monitor = self.get_resource(
             resources, kind="Deployment", name="kube-ovn-monitor"
         )
-        self.replace_node_selector(kube_ovn_monitor)
+        self.replace_node_selector(
+            kube_ovn_monitor,
+            self.model.config["control-plane-node-label"],
+            "kube-ovn/role",
+        )
         self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
@@ -200,7 +228,9 @@ class KubeOvnCharm(CharmBase):
         ovn_central = self.get_resource(
             resources, kind="Deployment", name="ovn-central"
         )
-        self.replace_node_selector(ovn_central)
+        self.replace_node_selector(
+            ovn_central, self.model.config["control-plane-node-label"], "kube-ovn/role"
+        )
         self.set_replicas(ovn_central, len(node_ips))
 
         ovn_central_container = self.get_container_resource(
@@ -211,6 +241,58 @@ class KubeOvnCharm(CharmBase):
         )
 
         self.apply_manifest(resources, "ovn.yaml")
+
+    def apply_speaker(self, registry, speaker_config: SpeakerConfig):
+        self.unit.status = MaintenanceStatus("Applying Speaker resource")
+        resources = self.load_manifest("speaker.yaml")
+        speaker = self.get_resource(
+            resources, kind="DaemonSet", name="kube-ovn-speaker"
+        )
+        speaker_container = self.get_container_resource(
+            speaker, container_name="kube-ovn-speaker"
+        )
+        self.replace_container_args(
+            speaker_container,
+            args={
+                "--neighbor-address": speaker_config.neighbor_address,
+                "--neighbor-as": speaker_config.neighbor_as,
+                "--cluster-as": speaker_config.cluster_as,
+            },
+        )
+        self.add_container_args(
+            speaker_container,
+            args={
+                "--announce-cluster-ip": speaker_config.announce_cluster_ip,
+                "--v": speaker_config.log_level,
+            },
+        )
+        self.replace_images(resources, registry)
+        self.replace_node_selector(
+            speaker, speaker_config.node_selector, "ovn.kubernetes.io/bgp"
+        )
+        self.replace_name(speaker, speaker_config.name)
+        self.apply_manifest(resources, f"{speaker_config.name}.speaker.yaml")
+
+    def remove_speakers(self):
+        log.info("Cleaning up any existing speakers ...")
+        rendered_dir = "templates/rendered/"
+        if os.path.isdir(rendered_dir):
+            for file in os.listdir(rendered_dir):
+                if file.endswith(".speaker.yaml"):
+                    filepath = os.path.join(rendered_dir, file)
+                    log.info(f"Removing {filepath}")
+                    if self.unit.is_leader():
+                        # Only need to delete the daemonset once, let the leader do it
+                        try:
+                            self.kubectl("delete", "-f", filepath)
+                        except CalledProcessError as e:
+                            log.error(
+                                f"Error removing speaker daemonset defined in {filepath}: {e}"
+                            )
+                    try:
+                        os.remove(filepath)
+                    except FileNotFoundError as e:
+                        log.error(f"Error deleting rendered yaml {filepath}: {e}")
 
     def check_if_pod_restart_will_be_needed(self):
         output = self.kubectl(
@@ -255,14 +337,33 @@ class KubeOvnCharm(CharmBase):
                 self.wait_for_kube_ovn_controller()
                 self.wait_for_kube_ovn_cni()
                 self.restart_pods()
+
+            self.apply_speakers(registry)
+
         except CalledProcessError:
             # Likely the Kubernetes API is unavailable. Log the exception in
-            # case it it something else, and let the caller know we failed.
+            # case it is something else, and let the caller know we failed.
             log.error(traceback.format_exc())
             self.unit.status = WaitingStatus("Waiting to retry configuring Kube-OVN")
             return
 
         self.stored.kube_ovn_configured = True
+
+    def apply_speakers(self, registry):
+        self.remove_speakers()
+        if self.model.config["bgp-speakers"]:
+            raw_speaker_config_list = list(
+                yaml.safe_load(self.model.config["bgp-speakers"])
+            )
+            try:
+                parsed_speaker_config_list = [
+                    SpeakerConfig(**d) for d in raw_speaker_config_list
+                ]
+                for speaker_config in parsed_speaker_config_list:
+                    self.apply_speaker(registry, speaker_config)
+            except ValidationError as e:
+                log.error(f"Error validating bgp-speakers config: {e}")
+                self.unit.status = BlockedStatus("Error validating bgp-speakers config")
 
     def get_registry(self):
         registry = self.model.config["image-registry"]
@@ -500,13 +601,15 @@ class KubeOvnCharm(CharmBase):
                             [registry] + container["image"].split("/")[-2:]
                         )
 
-    def replace_node_selector(self, resource):
-        label = self.model.config["control-plane-node-label"]
-        label_key, label_value = label.split("=")
+    def replace_node_selector(self, resource, new_label, key_to_replace):
+        label_key, label_value = new_label.split("=")
 
         node_selector = resource["spec"]["template"]["spec"]["nodeSelector"]
-        del node_selector["kube-ovn/role"]
+        del node_selector[key_to_replace]
         node_selector[label_key] = label_value
+
+    def replace_name(self, resource, new_name):
+        resource["metadata"]["name"] = new_name
 
     def restart_pods(self):
         self.unit.status = MaintenanceStatus("Restarting pods")

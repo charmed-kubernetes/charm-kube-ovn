@@ -9,6 +9,10 @@ def pytest_configure(config):
         "markers",
         "skip_kubectl_mock: mark tests which do not mock out KubeOvnCharm.kubectl",
     )
+    config.addinivalue_line(
+        "markers",
+        "skip_unlabel_bgp_nodes_mock: mark tests which do not mock out KubeOvnCharm.unlabel_bgp_nodes",
+    )
 
 
 @pytest.fixture(autouse=True)
