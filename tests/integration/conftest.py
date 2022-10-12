@@ -125,14 +125,27 @@ def gateway_client_pod(client, worker_node, subnet_resource):
         client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
 
 
-async def wait_pod_ip(client, pod):
-    for _, obj in client.watch(
-        Pod,
-        namespace=pod.metadata.namespace,
-        fields={"metadata.name": pod.metadata.name},
-    ):
-        if obj.status.podIP:
-            return obj
+async def wait_pod_ips(client, pods):
+    log.info("Waiting for pods...")
+    ready = []
+
+    for pod in pods:
+        client.wait(
+            Pod,
+            pod.metadata.name,
+            for_conditions=["Ready"],
+            namespace=pod.metadata.namespace,
+        )
+        for _, obj in client.watch(
+            Pod,
+            namespace=pod.metadata.namespace,
+            fields={"metadata.name": pod.metadata.name},
+        ):
+            if obj.status.podIP:
+                ready.append(obj)
+                break
+
+    return ready
 
 
 @pytest.fixture()
@@ -154,16 +167,7 @@ async def isolated_subnet(client, subnet_resource):
         client.get(Pod, name="allowed-pod", namespace="allowed"),
     ]
 
-    pods = []
-    log.info("Waiting for pods...")
-    for pod in watch:
-        client.wait(
-            Pod,
-            pod.metadata.name,
-            for_conditions=["Ready"],
-            namespace=pod.metadata.namespace,
-        )
-        pods.append(await wait_pod_ip(client, pod))
+    pods = await wait_pod_ips(client, watch)
 
     yield tuple(pods)
 
@@ -171,11 +175,15 @@ async def isolated_subnet(client, subnet_resource):
     for obj in codecs.load_all_yaml(path.read_text()):
         client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
 
+    await wait_for_removal(client, pods)
+
+
+async def wait_for_removal(client, pods):
     for pod in pods:
         namespace = pod.metadata.namespace
         remaining_pods = list(client.list(Pod, namespace=namespace))
         while len(remaining_pods) != 0:
-            log.info("Isolated pods still in existence, waiting ...")
+            log.info("Pods still in existence, waiting ...")
             remaining_pods = list(client.list(Pod, namespace=namespace))
             await asyncio.sleep(5)
 
@@ -799,3 +807,26 @@ def annotate(client, ops_test):
         )
 
     return f
+
+
+@pytest.fixture()
+async def network_policies(client):
+    log.info("Creating network policy resources ...")
+    path = Path("tests/data/network-policies.yaml")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.create(obj)
+
+    watch = [
+        client.get(Pod, name="blocked-pod", namespace="netpolicy"),
+        client.get(Pod, name="allowed-pod", namespace="netpolicy"),
+    ]
+
+    pods = await wait_pod_ips(client, watch)
+
+    yield tuple(pods)
+
+    log.info("Deleting network policy resources ...")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
+
+    await wait_for_removal(client, pods)

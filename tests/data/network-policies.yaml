@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: netpolicy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  namespace: netpolicy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: rocks.canonical.com/cdk/nginx:1.18
+        ports:
+        - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: netpolicy
+spec:
+  selector:
+    app: nginx
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 80
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: allowed-pod
+  namespace: netpolicy
+  labels:
+    access: 'yes'
+spec:
+  containers:
+  - image: rocks.canonical.com/cdk/busybox:1.32
+    name: 'allowed-pod'
+    command:
+      - sleep
+      - "3600"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: blocked-pod
+  namespace: netpolicy
+  labels:
+    access: 'no'
+spec:
+  containers:
+  - image: rocks.canonical.com/cdk/busybox:1.32
+    name: 'blocked-pod'
+    command:
+      - sleep
+      - "3600"

@@ -12,6 +12,7 @@ import re
 
 from ipaddress import ip_address, ip_network
 from lightkube.types import PatchType
+from lightkube.codecs import load_all_yaml
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -445,6 +446,27 @@ async def test_bgp(ops_test, ips_to_curl):
             assert await run_bird_curl_test(ops_test, unit, ip)
 
 
+async def test_network_policies(ops_test, client, kubectl_exec, network_policies):
+    blocked_pod, allowed_pod = network_policies
+
+    async def check_wget(url, client, msg):
+        stdout = await wget(kubectl_exec, client, url)
+        assert msg in stdout
+
+    log.info("Checking pods connectivity...")
+    for pod in network_policies:
+        await check_wget("nginx.netpolicy", pod, "'index.html' saved")
+
+    log.info("Applying NetworkPolicy...")
+    path = Path("tests/data/net-policy.yaml")
+    for obj in load_all_yaml(path.read_text()):
+        client.create(obj)
+
+    log.info("Checking NetworkPolicy...")
+    await check_wget("nginx.netpolicy", allowed_pod, "'index.html' saved")
+    await check_wget("nginx.netpolicy", blocked_pod, "wget: download timed out")
+
+
 class iPerfError(Exception):
     pass
 
@@ -531,6 +553,17 @@ async def ping(kubectl_exec, pinger, pingee, namespace):
     args = pinger.metadata.name, namespace, ping_cmd
     _, stdout, __ = await kubectl_exec(*args, check=False)
     return stdout
+
+
+async def wget(kubectl_exec, client, url):
+    wget_cmd = f"wget {url} -T 10"
+    args = client.metadata.name, client.metadata.namespace, wget_cmd
+    rc, stdout, stderr = await kubectl_exec(*args, check=False)
+    if rc == 0:
+        rm_cmd = "rm index.html"
+        args = client.metadata.name, client.metadata.namespace, rm_cmd
+        await kubectl_exec(*args, check=False)
+    return stdout + stderr
 
 
 def _ping_parse(stdout: str, line_filter: str, regex: re.Pattern, idx: int):
