@@ -349,7 +349,7 @@ async def k8s_model(k8s_cloud, ops_test):
 async def multus_installed(ops_test, k8s_model):
     _, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as model:
-        await model.deploy(entity_url="multus", channel="edge")
+        await model.deploy(entity_url="multus", trust=True, channel="edge")
         await model.block_until(lambda: "multus" in model.applications, timeout=60)
         await model.wait_for_idle(status="active", timeout=60 * 60)
 
