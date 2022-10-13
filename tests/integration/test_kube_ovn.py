@@ -449,6 +449,12 @@ async def test_bgp(ops_test, ips_to_curl):
 async def test_network_policies(ops_test, client, kubectl_exec, network_policies):
     blocked_pod, allowed_pod = network_policies
 
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(600),
+        wait=wait_fixed(1),
+        before=before_log(log, logging.INFO),
+    )
     async def check_wget(url, client, msg):
         stdout = await wget(kubectl_exec, client, url)
         assert msg in stdout
