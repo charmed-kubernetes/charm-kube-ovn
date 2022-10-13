@@ -258,8 +258,6 @@ def kubectl_exec(kubectl):
 @pytest.fixture(scope="module")
 async def k8s_storage(kubectl):
     await kubectl("apply", "-f", "tests/data/vsphere-storageclass.yaml")
-    log.info("waiting 2 minutes for storage ...")
-    await asyncio.sleep(120)
 
 
 @pytest.fixture(scope="module")
