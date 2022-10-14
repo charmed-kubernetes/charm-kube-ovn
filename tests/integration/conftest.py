@@ -407,8 +407,8 @@ async def grafana_app(ops_test, k8s_model):
         log.info("Deploying grafana-k8s ...")
         await m.deploy(entity_url="grafana-k8s", trust=True, channel="edge")
 
-        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60 * 5)
-        await m.wait_for_idle(status="active", timeout=60 * 5)
+        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60 * 10)
+        await m.wait_for_idle(status="active", timeout=60 * 10)
 
     yield "grafana-k8s"
 
