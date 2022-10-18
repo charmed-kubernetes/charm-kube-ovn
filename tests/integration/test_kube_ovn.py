@@ -470,13 +470,14 @@ async def test_network_policies(ops_test, client, kubectl_exec, network_policies
     for obj in policies:
         client.create(obj)
 
-    log.info("Checking NetworkPolicy...")
-    await check_wget("nginx.netpolicy", allowed_pod, "'index.html' saved")
-    await check_wget("nginx.netpolicy", blocked_pod, "wget: download timed out")
-
-    log.info("Removing NetworkPolicy...")
-    for obj in policies:
-        client.delete(type(obj), obj.metadata.name, obj.metadata.namespace)
+    try:
+        log.info("Checking NetworkPolicy...")
+        await check_wget("nginx.netpolicy", allowed_pod, "'index.html' saved")
+        await check_wget("nginx.netpolicy", blocked_pod, "wget: download timed out")
+    finally:
+        log.info("Removing NetworkPolicy...")
+        for obj in policies:
+            client.delete(type(obj), obj.metadata.name, obj.metadata.namespace)
 
 
 class iPerfError(Exception):
