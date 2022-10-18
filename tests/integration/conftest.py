@@ -126,6 +126,8 @@ def gateway_client_pod(client, worker_node, subnet_resource):
 
 
 async def wait_pod_ips(client, pods):
+    """Returns a list of pods which have an ip address assigned."""
+
     log.info("Waiting for pods...")
     ready = []
 
@@ -179,6 +181,7 @@ async def isolated_subnet(client, subnet_resource):
 
 
 async def wait_for_removal(client, pods):
+    """Waits until listed pods are no longer present in the cluster."""
     for pod in pods:
         namespace = pod.metadata.namespace
         remaining_pods = list(client.list(Pod, namespace=namespace))
