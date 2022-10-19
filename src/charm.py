@@ -183,14 +183,18 @@ class KubeOvnCharm(CharmBase):
                 "If enable-global-mirror is true, mirror-iface must be set"
             )
         else:
+            # Only enable the mirror if a mirror interface is also provided
             cni_args_to_replace["--enable-mirror"] = enable_global_mirror
         self.replace_container_args(cni_server_container, args=cni_args_to_replace)
 
-        cni_args_to_add = {"--mirror-iface": mirror_iface}
-        self.add_container_args(
-            cni_server_container,
-            args=cni_args_to_add,
-        )
+        cni_args_to_add = {}
+        if mirror_iface:
+            # The mirror interface can be enabled without enabling the global mirror above.
+            cni_args_to_add["--mirror-iface"] = mirror_iface
+            self.add_container_args(
+                cni_server_container,
+                args=cni_args_to_add,
+            )
 
         kube_ovn_pinger = self.get_resource(
             resources, kind="DaemonSet", name="kube-ovn-pinger"

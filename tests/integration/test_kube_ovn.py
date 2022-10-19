@@ -475,17 +475,18 @@ async def test_global_mirror(ops_test):
             "mirror-iface": mirror_iface,
         }
     )
-    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
-    assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x > 0)
-
-    log.info("Disabling global mirror ...")
-    await kube_ovn_app.set_config(
-        {
-            "enable-global-mirror": "false",
-            "mirror-iface": mirror_iface,
-        }
-    )
-    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    try:
+        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+        assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x > 0)
+    finally:
+        log.info("Disabling global mirror ...")
+        await kube_ovn_app.set_config(
+            {
+                "enable-global-mirror": "false",
+                "mirror-iface": mirror_iface,
+            }
+        )
+        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
 
 class BGPError(Exception):
