@@ -477,7 +477,9 @@ async def test_global_mirror(ops_test):
     )
     try:
         await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
-        assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x > 0)
+        assert await run_tcpdump_test(
+            ops_test, worker_unit, mirror_iface, lambda x: x > 0
+        )
     finally:
         log.info("Disabling global mirror ...")
         await kube_ovn_app.set_config(
