@@ -349,7 +349,7 @@ async def k8s_model(k8s_cloud, ops_test):
 async def multus_installed(ops_test, k8s_model):
     _, k8s_alias = k8s_model
     with ops_test.model_context(k8s_alias) as model:
-        await model.deploy(entity_url="multus", channel="edge")
+        await model.deploy(entity_url="multus", trust=True, channel="edge")
         await model.block_until(lambda: "multus" in model.applications, timeout=60)
         await model.wait_for_idle(status="active", timeout=60 * 60)
 
@@ -407,8 +407,8 @@ async def grafana_app(ops_test, k8s_model):
         log.info("Deploying grafana-k8s ...")
         await m.deploy(entity_url="grafana-k8s", trust=True, channel="edge")
 
-        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60 * 5)
-        await m.wait_for_idle(status="active", timeout=60 * 5)
+        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60 * 10)
+        await m.wait_for_idle(status="active", timeout=60 * 10)
 
     yield "grafana-k8s"
 

@@ -143,6 +143,8 @@ class KubeOvnCharm(CharmBase):
         node_switch_cidr = self.model.config["node-switch-cidr"]
         node_switch_gateway = self.model.config["node-switch-gateway"]
         node_ips = self.get_ovn_node_ips()
+        enable_global_mirror = self.model.config["enable-global-mirror"]
+        mirror_iface = self.model.config["mirror-iface"]
 
         self.replace_images(resources, registry)
 
@@ -173,9 +175,26 @@ class KubeOvnCharm(CharmBase):
         cni_server_container = self.get_container_resource(
             kube_ovn_cni, container_name="cni-server"
         )
-        self.replace_container_args(
-            cni_server_container, args={"--service-cluster-ip-range": service_cidr}
-        )
+
+        cni_args_to_replace = {"--service-cluster-ip-range": service_cidr}
+        if enable_global_mirror and not mirror_iface:
+            log.error("If enable-global-mirror is true, mirror-iface must be set")
+            self.unit.status = BlockedStatus(
+                "If enable-global-mirror is true, mirror-iface must be set"
+            )
+        else:
+            # Only enable the mirror if a mirror interface is also provided
+            cni_args_to_replace["--enable-mirror"] = enable_global_mirror
+        self.replace_container_args(cni_server_container, args=cni_args_to_replace)
+
+        cni_args_to_add = {}
+        if mirror_iface:
+            # The mirror interface can be enabled without enabling the global mirror above.
+            cni_args_to_add["--mirror-iface"] = mirror_iface
+            self.add_container_args(
+                cni_server_container,
+                args=cni_args_to_add,
+            )
 
         kube_ovn_pinger = self.get_resource(
             resources, kind="DaemonSet", name="kube-ovn-pinger"

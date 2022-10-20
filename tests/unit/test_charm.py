@@ -510,6 +510,8 @@ def test_apply_kube_ovn(
         "pinger-external-dns": "1.1.1.1",
         "node-switch-cidr": "100.64.0.0/16",
         "node-switch-gateway": "100.64.0.1",
+        "enable-global-mirror": True,
+        "mirror-iface": "some-interface",
     }
     harness.update_config(config_dict)
     node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
@@ -579,7 +581,10 @@ def test_apply_kube_ovn(
             ),
             mock.call(
                 cni_server_container,
-                args={"--service-cluster-ip-range": DEFAULT_SERVICE_CIDR},
+                args={
+                    "--service-cluster-ip-range": DEFAULT_SERVICE_CIDR,
+                    "--enable-mirror": True,
+                },
             ),
             mock.call(
                 pinger_container,
@@ -591,11 +596,17 @@ def test_apply_kube_ovn(
         ]
     )
 
-    add_container_args.called_once_with(
-        mock.call(
-            kube_ovn_controller_container,
-            args={"--node-switch-gateway": config_dict["node-switch-gateway"]},
-        )
+    add_container_args.assert_has_calls(
+        [
+            mock.call(
+                kube_ovn_controller_container,
+                args={"--node-switch-gateway": config_dict["node-switch-gateway"]},
+            ),
+            mock.call(
+                cni_server_container,
+                args={"--mirror-iface": "some-interface"},
+            ),
+        ]
     )
 
     replace_node_selector.assert_called_once_with(
@@ -606,6 +617,54 @@ def test_apply_kube_ovn(
     assert kube_ovn_monitor["spec"]["replicas"] == len(node_ips)
 
     apply_manifest.assert_called_once_with(resources, "kube-ovn.yaml")
+
+    # Test invalid mirror config path
+    replace_container_args.reset_mock()
+    add_container_args.reset_mock()
+    (
+        kube_ovn_controller,
+        kube_ovn_cni,
+        kube_ovn_pinger,
+        kube_ovn_monitor,
+    ) = get_resource.side_effect = [
+        mock.MagicMock(),
+        mock.MagicMock(),
+        mock.MagicMock(),
+        dict(spec=dict(replicas=None)),
+    ]
+
+    (
+        kube_ovn_controller_container,
+        cni_server_container,
+        pinger_container,
+    ) = get_container_resource.side_effect = [
+        mock.MagicMock(),
+        mock.MagicMock(),
+        mock.MagicMock(),
+    ]
+    config_dict = {
+        "default-cidr": "172.22.0.0/16",
+        "default-gateway": "172.22.0.1",
+        "pinger-external-address": "10.152.183.1",
+        "pinger-external-dns": "1.1.1.1",
+        "node-switch-cidr": "100.64.0.0/16",
+        "node-switch-gateway": "100.64.0.1",
+        "mirror-iface": "",
+        "enable-global-mirror": True,
+    }
+    harness.update_config(config_dict)
+    charm.apply_kube_ovn(DEFAULT_SERVICE_CIDR, DEFAULT_IMAGE_REGISTRY)
+    assert charm.unit.status == BlockedStatus(
+        "If enable-global-mirror is true, mirror-iface must be set"
+    )
+    replace_container_args.assert_has_calls(
+        [
+            mock.call(
+                cni_server_container,
+                args={"--service-cluster-ip-range": DEFAULT_SERVICE_CIDR},
+            ),
+        ]
+    )
 
 
 @mock.patch("charm.KubeOvnCharm.load_manifest")
