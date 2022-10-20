@@ -439,7 +439,7 @@ async def run_tcpdump_test(ops_test, unit, interface, capture_comparator, filter
                 captured = int(line.split(" ")[0])
                 if capture_comparator(captured):
                     log.info(
-                        f"Comparison succeeded. Number of packets captured: {captured}\n"
+                        f"Comparison succeeded. Number of packets captured: {captured}"
                     )
                     return True
                 else:
@@ -467,8 +467,8 @@ async def test_global_mirror(ops_test):
     assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x == 0)
 
     # Configure and test that traffic is being captured (more than 0 captured)
-    # Note this will be retried a few times, as it takes a bit of time for the newly configured daemonset
-    # to get restarted
+    # Note this will be retried a few times, as it takes a bit of time for the newly configured
+    # daemonset to get restarted
     log.info("Enabling global mirror ...")
     await kube_ovn_app.set_config(
         {
@@ -476,17 +476,20 @@ async def test_global_mirror(ops_test):
             "mirror-iface": mirror_iface,
         }
     )
-    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
-    assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x > 0)
-
-    log.info("Disabling global mirror ...")
-    await kube_ovn_app.set_config(
-        {
-            "enable-global-mirror": "false",
-            "mirror-iface": mirror_iface,
-        }
-    )
-    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    try:
+        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+        assert await run_tcpdump_test(
+            ops_test, worker_unit, mirror_iface, lambda x: x > 0
+        )
+    finally:
+        log.info("Disabling global mirror ...")
+        await kube_ovn_app.set_config(
+            {
+                "enable-global-mirror": "false",
+                "mirror-iface": mirror_iface,
+            }
+        )
+        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
 
 async def test_pod_mirror(ops_test, nginx_pods, annotate):
@@ -505,6 +508,7 @@ async def test_pod_mirror(ops_test, nginx_pods, annotate):
     mirror_iface = "mirror0"
 
     # For pod level mirroring, mirror-face must be set, and enable-global-mirror must be false
+    # This is the default config, so resetting after the test is not necessary
     log.info("Configuring pod level mirroring ...")
     await kube_ovn_app.set_config(
         {
@@ -514,8 +518,8 @@ async def test_pod_mirror(ops_test, nginx_pods, annotate):
     )
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
-    # Unlike the global test, the pod level test must check the interface of the worker unit that the pod
-    # is running on.
+    # Unlike the global test, the pod level test must check the interface of the worker unit
+    # that the pod is running on.
     for pod in nginx_pods():
         host_ip = pod.status.hostIP
         pod_ip = pod.status.podIP
@@ -721,8 +725,8 @@ def parse_tc_show(stdout):
 
 
 async def curl_from_unit(ops_test, unit, ip_to_curl):
-    # cmd = f"juju ssh --pty=false -m {ops_test.model_full_name} {unit.name} curl --connect-timeout 5 {ip_to_curl}"
-    cmd = f" ssh --pty=false -m {ops_test.model_full_name} {unit.name} -- curl --connect-timeout 5 {ip_to_curl}"
+    cmd = f" ssh --pty=false -m {ops_test.model_full_name} {unit.name} -- " \
+          f"curl --connect-timeout 5 {ip_to_curl}"
     return await ops_test.juju(
         *shlex.split(cmd),
     )
