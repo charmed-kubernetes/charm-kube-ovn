@@ -477,7 +477,9 @@ async def test_network_policies(ops_test, client, kubectl_exec, network_policies
     finally:
         log.info("Removing NetworkPolicy...")
         for obj in policies:
-            client.delete(type(obj), obj.metadata.name, obj.metadata.namespace)
+            client.delete(
+                type(obj), obj.metadata.name, namespace=obj.metadata.namespace
+            )
 
 
 class iPerfError(Exception):
