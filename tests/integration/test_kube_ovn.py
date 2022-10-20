@@ -725,8 +725,10 @@ def parse_tc_show(stdout):
 
 
 async def curl_from_unit(ops_test, unit, ip_to_curl):
-    cmd = f" ssh --pty=false -m {ops_test.model_full_name} {unit.name} -- " \
-          f"curl --connect-timeout 5 {ip_to_curl}"
+    cmd = (
+        f" ssh --pty=false -m {ops_test.model_full_name} {unit.name} -- "
+        f"curl --connect-timeout 5 {ip_to_curl}"
+    )
     return await ops_test.juju(
         *shlex.split(cmd),
     )
