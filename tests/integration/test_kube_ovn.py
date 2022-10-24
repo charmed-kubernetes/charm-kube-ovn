@@ -348,19 +348,6 @@ async def test_grafana(
     assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
 
 
-@pytest.mark.skip
-async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
-    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
-    while not await prometheus.is_ready():
-        log.info("Waiting for Prometheus to be ready...")
-        await asyncio.sleep(5)
-    log.info("Waiting for metrics...")
-    await asyncio.sleep(60)
-    metrics = await prometheus.metrics_all()
-
-    assert set(expected_prometheus_metrics).issubset(set(metrics))
-
-
 @pytest.fixture()
 async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
@@ -408,6 +395,18 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert len(iface_addrs["net1"]) == 1
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
+
+
+async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
+    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+    while not await prometheus.is_ready():
+        log.info("Waiting for Prometheus to be ready...")
+        await asyncio.sleep(5)
+    log.info("Waiting for metrics...")
+    await asyncio.sleep(60)
+    metrics = await prometheus.metrics_all()
+
+    assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
 class TCPDumpError(Exception):
