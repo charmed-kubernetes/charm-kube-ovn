@@ -348,6 +348,7 @@ async def test_grafana(
     assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
 
 
+@pytest.mark.skip
 async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
     prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
     while not await prometheus.is_ready():
