@@ -9,6 +9,7 @@ import pytest
 import logging
 import json
 import re
+from contextlib import suppress
 
 from ipaddress import ip_address, ip_network
 from lightkube.types import PatchType
@@ -348,18 +349,6 @@ async def test_grafana(
     assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
 
 
-async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
-    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
-    while not await prometheus.is_ready():
-        log.info("Waiting for Prometheus to be ready...")
-        await asyncio.sleep(5)
-    log.info("Waiting for metrics...")
-    await asyncio.sleep(60)
-    metrics = await prometheus.metrics_all()
-
-    assert set(expected_prometheus_metrics).issubset(set(metrics))
-
-
 @pytest.fixture()
 async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
@@ -409,6 +398,18 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
 
 
+async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
+    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+    while not await prometheus.is_ready():
+        log.info("Waiting for Prometheus to be ready...")
+        await asyncio.sleep(5)
+    log.info("Waiting for metrics...")
+    await asyncio.sleep(60)
+    metrics = await prometheus.metrics_all()
+
+    assert set(expected_prometheus_metrics).issubset(set(metrics))
+
+
 class TCPDumpError(Exception):
     pass
 
@@ -419,8 +420,8 @@ class TCPDumpError(Exception):
     wait=wait_fixed(1),
     before=before_log(log, logging.INFO),
 )
-async def run_tcpdump_test(ops_test, unit, interface, capture_comparator):
-    juju_cmd = f"ssh {unit.name} -- sudo timeout 5 tcpdump -ni {interface}"
+async def run_tcpdump_test(ops_test, unit, interface, capture_comparator, filter=""):
+    juju_cmd = f"ssh --pty=false {unit.name} -- sudo timeout 5 tcpdump -ni {interface} {filter}"
     retcode, stdout, stderr = await ops_test.juju(
         *shlex.split(juju_cmd),
         check=False,
@@ -467,8 +468,8 @@ async def test_global_mirror(ops_test):
     assert await run_tcpdump_test(ops_test, worker_unit, mirror_iface, lambda x: x == 0)
 
     # Configure and test that traffic is being captured (more than 0 captured)
-    # Note this will be retried a few times, as it takes a bit of time for the newly configured daemonset
-    # to get restarted
+    # Note this will be retried a few times, as it takes a bit of time for the newly configured
+    # daemonset to get restarted
     log.info("Enabling global mirror ...")
     await kube_ovn_app.set_config(
         {
@@ -492,6 +493,63 @@ async def test_global_mirror(ops_test):
         await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
 
+async def test_pod_mirror(ops_test, nginx_pods, annotate):
+    async def repeated_curl(unit, ip_to_curl, wait_time):
+        while True:
+            log.info(f"Curling {ip_to_curl} from {unit.name}")
+            retcode, stdout, stderr = await curl_from_unit(ops_test, unit, ip_to_curl)
+            if retcode != 0:
+                log.info(f"failed to reach {ip_to_curl} from {unit.name}")
+                log.info(f"stdout: {stdout}")
+                log.info(f"stderr: {stderr}")
+            await asyncio.sleep(wait_time)
+
+    kube_ovn_app = ops_test.model.applications["kube-ovn"]
+    worker_app = ops_test.model.applications["kubernetes-worker"]
+    mirror_iface = "mirror0"
+
+    # For pod level mirroring, mirror-face must be set, and enable-global-mirror must be false
+    # This is the default config, so resetting after the test is not necessary
+    log.info("Configuring pod level mirroring ...")
+    await kube_ovn_app.set_config(
+        {
+            "enable-global-mirror": "false",
+            "mirror-iface": mirror_iface,
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+
+    # Unlike the global test, the pod level test must check the interface of the worker unit
+    # that the pod is running on.
+    for pod in nginx_pods():
+        host_ip = pod.status.hostIP
+        pod_ip = pod.status.podIP
+        # Find unit with corresponding IP
+        for unit in worker_app.units:
+            if await unit.get_public_address() == host_ip:
+                # Need to repeatedly start curling now
+                task = asyncio.ensure_future(repeated_curl(unit, pod_ip, 1))
+                assert await run_tcpdump_test(
+                    ops_test,
+                    unit,
+                    mirror_iface,
+                    lambda x: x == 0,
+                    filter=f"dst {pod_ip} and port 80",
+                )
+                annotate(pod, {"ovn.kubernetes.io/mirror": "true"})
+                assert await run_tcpdump_test(
+                    ops_test,
+                    unit,
+                    mirror_iface,
+                    lambda x: x > 0,
+                    filter=f"dst {pod_ip} and port 80",
+                )
+                # stop curling
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+
 class BGPError(Exception):
     pass
 
@@ -503,17 +561,7 @@ class BGPError(Exception):
     before=before_log(log, logging.INFO),
 )
 async def run_bird_curl_test(ops_test, unit, ip_to_curl):
-    retcode, stdout, stderr = await ops_test.run(
-        "juju",
-        "ssh",
-        "-m",
-        ops_test.model_full_name,
-        unit.name,
-        "curl",
-        "--connect-timeout",
-        "5",
-        ip_to_curl,
-    )
+    retcode, stdout, stderr = await curl_from_unit(ops_test, unit, ip_to_curl)
     if retcode == 0:
         return True
     else:
@@ -721,3 +769,13 @@ def parse_tc_show(stdout):
     # Limit value directly follows the string limit
     limit_value = netem_split[limit_index + 1]
     return int(limit_value)
+
+
+async def curl_from_unit(ops_test, unit, ip_to_curl):
+    cmd = (
+        f"ssh --pty=false -m {ops_test.model_full_name} {unit.name} -- "
+        f"curl --connect-timeout 5 {ip_to_curl}"
+    )
+    return await ops_test.juju(
+        *shlex.split(cmd),
+    )
