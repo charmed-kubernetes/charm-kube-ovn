@@ -10,4 +10,4 @@ jobs:
 
   lint-unit:
     name: Lint Unit
-    uses: charmed-kubernetes/workflows/.github/workflows/lint-unit.yaml@main
+    uses: charmed-kubernetes/workflows/.github/workflows/lint-unit.yaml@mfs/bump-versions
