@@ -765,6 +765,77 @@ async def bird(ops_test):
     )
 
 
+@pytest_asyncio.fixture(scope="module")
+async def bird_container_ip(ops_test, bird):
+    bird_app = ops_test.model.applications["bird"]
+    bird_unit = bird_app.units[0]
+
+    cmd = f"run --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    assert rc == 0, f"Failed to enable IP forwarding: {(stdout or stderr).strip()}"
+
+    cmd = f"run --unit {bird_unit.name} -- sudo apt install -y jq"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    assert rc == 0, f"Failed to install jq: {(stdout or stderr).strip()}"
+
+    log.info(f"Creating ubuntu container on bird unit {bird_unit.name}")
+    cmd = f"run --unit {bird_unit.name} -- sudo lxd init --auto"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    assert rc == 0, f"Failed to initialize lxd: {(stdout or stderr).strip()}"
+
+    cmd = f"run --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    assert rc == 0, f"Failed to launch ubuntu container: {(stdout or stderr).strip()}"
+
+    cmd = f'run --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
+    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
+    assert rc == 0, f"Failed to get container IP: {(stdout or stderr).strip()}"
+
+    container_ip = stdout
+    log.info(f"Ubuntu container IP {container_ip}")
+    return container_ip
+
+
+@pytest_asyncio.fixture(scope="module")
+async def external_gateway_pod(ops_test, client, subnet_resource):
+    bird_app = ops_test.model.applications["bird"]
+    bird_unit = bird_app.units[0]
+    log.info(f"Getting IP for bird unit {bird_unit.name}")
+    cmd = f"juju show-unit {bird_unit.name}"
+    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
+    assert rc == 0, f"Failed to get {bird_unit.name} unit data: {(stdout or stderr).strip()}"
+
+    unit_data = yaml.safe_load(stdout)
+    bird_unit_ip = unit_data[bird_unit.name]["public-address"]
+
+    # Create subnet, namespace, and pod for external gateway
+    log.info("Creating subnet, namespace, and pod for external gateway testing ...")
+    path = Path("tests/data/external-gateway.yaml")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        if obj.kind == "Subnet":
+            obj.spec["externalEgressGateway"] = bird_unit_ip
+        if obj.kind == "Namespace":
+            namespace = obj.metadata.name
+        if obj.kind == "Pod":
+            pod_name = obj.metadata.name
+        client.create(obj)
+
+    external_pod = client.get(Pod, name=pod_name, namespace=namespace)
+    # wait for pod to come up
+    client.wait(
+        Pod,
+        external_pod.metadata.name,
+        for_conditions=["Ready"],
+        namespace=namespace,
+    )
+    yield external_pod
+
+    log.info("Deleting external-gateway related resources ...")
+    for obj in codecs.load_all_yaml(path.read_text()):
+        client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
+
+
+
 @pytest_asyncio.fixture(params=["pods", "subnet", "service"])
 async def ips_to_curl(request, nginx_pods, nginx_cluster_ip, annotate, kubectl):
     if request.param == "pods":

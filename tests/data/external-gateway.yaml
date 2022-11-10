@@ -1,0 +1,33 @@
+# https://kubeovn.github.io/docs/v1.10.x/en/advance/external-gateway/
+kind: Subnet
+apiVersion: kubeovn.io/v1
+metadata:
+  name: external
+  annotations:
+    ovn.kubernetes.io/bgp: "true"
+spec:
+  cidrBlock: 172.31.0.0/16
+  gatewayType: distributed
+  natOutgoing: false
+  externalEgressGateway: 192.168.0.1
+  policyRoutingTableID: 1000
+  policyRoutingPriority: 1500
+  namespaces:
+  - external-ns
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: external-ns
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: perf-client
+  namespace: external-ns
+  labels:
+    app.kubernetes.io/name: perf-client
+spec:
+  containers:
+  - name: perf-client
+    image: rocks.canonical.com/cdk/kubeovn/perf:latest
