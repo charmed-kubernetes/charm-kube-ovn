@@ -10,7 +10,6 @@ import logging
 import json
 import re
 from contextlib import suppress
-import time
 
 from ipaddress import ip_address, ip_network
 from lightkube.types import PatchType
@@ -22,8 +21,6 @@ from tenacity import (
     stop_after_delay,
     wait_fixed,
     before_log,
-    AsyncRetrying,
-    RetryError
 )
 
 
@@ -628,12 +625,18 @@ class ExternalPingError(Exception):
 )
 async def run_external_ping_test(kubectl_exec, external_gateway_pod, bird_container_ip):
     ping_cmd = f"ping -w 5 {bird_container_ip}"
-    args = external_gateway_pod.metadata.name, external_gateway_pod.metadata.namespace, ping_cmd
+    args = (
+        external_gateway_pod.metadata.name,
+        external_gateway_pod.metadata.namespace,
+        ping_cmd,
+    )
     rc, stdout, stderr = await kubectl_exec(*args, check=False)
     if rc == 0:
         return True
     else:
-        raise ExternalPingError(f"Failed to ping {bird_container_ip} from pod {external_gateway_pod.metadata.name}")
+        raise ExternalPingError(
+            f"Failed to ping {bird_container_ip} from pod {external_gateway_pod.metadata.name}"
+        )
 
 
 async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl_exec):
@@ -648,9 +651,14 @@ async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl
     # Response traffic from the LXD container is then routed back to the pod via BGP (this is necessary as the subnet
     # has natOutgoing set to false, so BGP is what enables response traffic to get back to the pod)
 
-    log.info(f"Pinging {bird_container_ip} from within pod {external_gateway_pod.metadata.name} in namespace "
-             f"{external_gateway_pod.metadata.namespace}")
-    assert await run_external_ping_test(kubectl_exec, external_gateway_pod, bird_container_ip)
+    log.info(
+        f"Pinging {bird_container_ip} from within pod {external_gateway_pod.metadata.name} in namespace "
+        f"{external_gateway_pod.metadata.namespace}"
+    )
+    assert await run_external_ping_test(
+        kubectl_exec, external_gateway_pod, bird_container_ip
+    )
+
 
 class iPerfError(Exception):
     pass

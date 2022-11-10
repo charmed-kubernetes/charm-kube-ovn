@@ -803,7 +803,9 @@ async def external_gateway_pod(ops_test, client, subnet_resource):
     log.info(f"Getting IP for bird unit {bird_unit.name}")
     cmd = f"juju show-unit {bird_unit.name}"
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to get {bird_unit.name} unit data: {(stdout or stderr).strip()}"
+    assert (
+        rc == 0
+    ), f"Failed to get {bird_unit.name} unit data: {(stdout or stderr).strip()}"
 
     unit_data = yaml.safe_load(stdout)
     bird_unit_ip = unit_data[bird_unit.name]["public-address"]
@@ -833,7 +835,6 @@ async def external_gateway_pod(ops_test, client, subnet_resource):
     log.info("Deleting external-gateway related resources ...")
     for obj in codecs.load_all_yaml(path.read_text()):
         client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
-
 
 
 @pytest_asyncio.fixture(params=["pods", "subnet", "service"])
