@@ -1,4 +1,5 @@
 # https://kubeovn.github.io/docs/v1.10.x/en/advance/external-gateway/
+# N.B. Gateway type must be distributed, not centralized as shown in the documentation
 kind: Subnet
 apiVersion: kubeovn.io/v1
 metadata:
