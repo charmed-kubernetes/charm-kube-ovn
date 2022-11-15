@@ -41,7 +41,7 @@ async def test_build_and_deploy(ops_test: OpsTest):
     plugin_path = Path.cwd() / "plugins/kubectl-ko"
 
     overlays = [
-        ops_test.Bundle("kubernetes-core", channel="edge"),
+        ops_test.Bundle("kubernetes-core", channel="1.25/stable"),
         Path("tests/data/charm.yaml"),
         Path("tests/data/vsphere-overlay.yaml"),
     ]
