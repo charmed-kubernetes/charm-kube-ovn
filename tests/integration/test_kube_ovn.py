@@ -332,7 +332,6 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
     await check_ping(0)
 
 
-@pytest.mark.skip
 async def test_grafana(
     ops_test, grafana_host, grafana_password, expected_dashboard_titles
 ):
