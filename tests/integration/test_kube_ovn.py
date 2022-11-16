@@ -332,22 +332,6 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
     await check_ping(0)
 
 
-async def test_grafana(
-    ops_test, grafana_host, grafana_password, expected_dashboard_titles
-):
-    # port is defined in grafana_service.yaml
-    grafana = Grafana(ops_test, host=grafana_host, port=30123, pw=grafana_password)
-    while not await grafana.is_ready():
-        log.info("Waiting for Grafana to be ready ...")
-        await asyncio.sleep(5)
-    dashboards = await grafana.dashboards_all()
-    actual_dashboard_titles = []
-    for dashboard in dashboards:
-        actual_dashboard_titles.append(dashboard["title"])
-
-    assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
-
-
 @pytest.fixture()
 async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
@@ -395,18 +379,6 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert len(iface_addrs["net1"]) == 1
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
-
-
-async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
-    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
-    while not await prometheus.is_ready():
-        log.info("Waiting for Prometheus to be ready...")
-        await asyncio.sleep(5)
-    log.info("Waiting for metrics...")
-    await asyncio.sleep(60)
-    metrics = await prometheus.metrics_all()
-
-    assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
 class TCPDumpError(Exception):
@@ -657,6 +629,34 @@ async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl
     assert await run_external_ping_test(
         kubectl_exec, external_gateway_pod, bird_container_ip
     )
+
+
+async def test_grafana(
+    ops_test, grafana_host, grafana_password, expected_dashboard_titles
+):
+    # port is defined in grafana_service.yaml
+    grafana = Grafana(ops_test, host=grafana_host, port=30123, pw=grafana_password)
+    while not await grafana.is_ready():
+        log.info("Waiting for Grafana to be ready ...")
+        await asyncio.sleep(5)
+    dashboards = await grafana.dashboards_all()
+    actual_dashboard_titles = []
+    for dashboard in dashboards:
+        actual_dashboard_titles.append(dashboard["title"])
+
+    assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
+
+
+async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
+    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+    while not await prometheus.is_ready():
+        log.info("Waiting for Prometheus to be ready...")
+        await asyncio.sleep(5)
+    log.info("Waiting for metrics...")
+    await asyncio.sleep(60)
+    metrics = await prometheus.metrics_all()
+
+    assert set(expected_prometheus_metrics).issubset(set(metrics))
 
 
 class iPerfError(Exception):
