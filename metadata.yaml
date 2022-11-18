@@ -6,8 +6,8 @@ issues: https://bugs.launchpad.net/charm-kube-ovn
 docs: https://discourse.charmhub.io/t/kube-ovn-docs-index/6929
 subordinate: true
 series:
-  - focal
   - jammy
+  - focal
 requires:
   cni:
     interface: kubernetes-cni
