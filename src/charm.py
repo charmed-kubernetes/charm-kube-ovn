@@ -104,7 +104,7 @@ class KubeOvnCharm(CharmBase):
 
     def apply_crds(self):
         self.unit.status = MaintenanceStatus("Applying CRDs")
-        self.kubectl("apply", "-f", "templates/crd.yaml")
+        self.kubectl("apply", "-f", "templates/kube-ovn/kube-ovn-crd.yaml")
 
     def apply_grafana_agent(self, remote_endpoints):
         namespace = self.stored.grafana_namespace
@@ -135,7 +135,7 @@ class KubeOvnCharm(CharmBase):
 
     def apply_kube_ovn(self, service_cidr, registry):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
-        resources = self.load_manifest("kube-ovn.yaml")
+        resources = self.load_manifest("kube-ovn/kube-ovn.yaml")
         cidr = self.model.config["default-cidr"]
         gateway = self.model.config["default-gateway"]
         pinger_address = self.model.config["pinger-external-address"]
@@ -151,6 +151,8 @@ class KubeOvnCharm(CharmBase):
         kube_ovn_controller = self.get_resource(
             resources, kind="Deployment", name="kube-ovn-controller"
         )
+        self.set_replicas(kube_ovn_controller, len(node_ips))
+
         kube_ovn_controller_container = self.get_container_resource(
             kube_ovn_controller, container_name="kube-ovn-controller"
         )
@@ -162,6 +164,9 @@ class KubeOvnCharm(CharmBase):
                 "--service-cluster-ip-range": service_cidr,
                 "--node-switch-cidr": node_switch_cidr,
             },
+        )
+        self.replace_container_env_vars(
+            kube_ovn_controller_container, env_vars={"OVN_DB_IPS": ",".join(node_ips)}
         )
 
         self.add_container_args(
@@ -215,7 +220,6 @@ class KubeOvnCharm(CharmBase):
             self.model.config["control-plane-node-label"],
             "kube-ovn/role",
         )
-        self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
 
@@ -225,7 +229,7 @@ class KubeOvnCharm(CharmBase):
 
     def apply_ovn(self, registry):
         self.unit.status = MaintenanceStatus("Applying OVN resources")
-        resources = self.load_manifest("ovn.yaml")
+        resources = self.load_manifest("kube-ovn/ovn.yaml")
         node_ips = self.get_ovn_node_ips()
         self.replace_images(resources, registry)
 
@@ -244,11 +248,19 @@ class KubeOvnCharm(CharmBase):
             ovn_central_container, env_vars={"NODE_IPS": ",".join(node_ips)}
         )
 
+        ovs_ovn = self.get_resource(resources, kind="DaemonSet", name="ovs-ovn")
+        openvswitch_container = self.get_container_resource(
+            ovs_ovn, container_name="openvswitch"
+        )
+        self.replace_container_env_vars(
+            openvswitch_container, env_vars={"OVN_DB_IPS": ",".join(node_ips)}
+        )
+
         self.apply_manifest(resources, "ovn.yaml")
 
     def apply_speaker(self, registry, speaker_config: SpeakerConfig):
         self.unit.status = MaintenanceStatus("Applying Speaker resource")
-        resources = self.load_manifest("speaker.yaml")
+        resources = self.load_manifest("kube-ovn/speaker.yaml")
         speaker = self.get_resource(
             resources, kind="DaemonSet", name="kube-ovn-speaker"
         )
