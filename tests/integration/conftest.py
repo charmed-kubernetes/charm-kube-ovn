@@ -40,17 +40,15 @@ def pytest_addoption(parser):
 async def kubeconfig(ops_test):
     kubeconfig_path = ops_test.tmp_path / "kubeconfig"
     rc, stdout, stderr = await ops_test.run(
-        "juju",
-        "scp",
-        "kubernetes-control-plane/leader:/home/ubuntu/config",
-        kubeconfig_path,
+        "juju", "ssh", "kubernetes-control-plane/leader", "--", "cat", "kubeconfig"
     )
     if rc != 0:
         log.error(f"retcode: {rc}")
         log.error(f"stdout:\n{stdout.strip()}")
         log.error(f"stderr:\n{stderr.strip()}")
         pytest.fail("Failed to copy kubeconfig from kubernetes-control-plane")
-    assert Path(kubeconfig_path).stat().st_size, "kubeconfig file is 0 bytes"
+    assert stdout, "kubeconfig file is 0 bytes"
+    kubeconfig_path.write_text(stdout)
     yield kubeconfig_path
 
 
