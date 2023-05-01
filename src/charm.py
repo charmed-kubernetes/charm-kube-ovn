@@ -136,6 +136,7 @@ class KubeOvnCharm(CharmBase):
     def apply_kube_ovn(self, service_cidr, registry):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
         resources = self.load_manifest("kube-ovn/kube-ovn.yaml")
+        control_plane_node_label = self.model.config["control-plane-node-label"]
         cidr = self.model.config["default-cidr"]
         gateway = self.model.config["default-gateway"]
         pinger_address = self.model.config["pinger-external-address"]
@@ -152,6 +153,9 @@ class KubeOvnCharm(CharmBase):
             resources, kind="Deployment", name="kube-ovn-controller"
         )
         self.set_replicas(kube_ovn_controller, len(node_ips))
+        self.set_node_selector(
+            kube_ovn_controller, control_plane_node_label, replace="kube-ovn/role"
+        )
 
         kube_ovn_controller_container = self.get_container_resource(
             kube_ovn_controller, container_name="kube-ovn-controller"
@@ -189,7 +193,7 @@ class KubeOvnCharm(CharmBase):
             )
         else:
             # Only enable the mirror if a mirror interface is also provided
-            cni_args_to_replace["--enable-mirror"] = enable_global_mirror
+            cni_args_to_replace["--enable-mirror"] = str(enable_global_mirror).lower()
         self.replace_container_args(cni_server_container, args=cni_args_to_replace)
 
         cni_args_to_add = {}
@@ -215,11 +219,12 @@ class KubeOvnCharm(CharmBase):
         kube_ovn_monitor = self.get_resource(
             resources, kind="Deployment", name="kube-ovn-monitor"
         )
-        self.replace_node_selector(
+        self.set_node_selector(
             kube_ovn_monitor,
-            self.model.config["control-plane-node-label"],
-            "kube-ovn/role",
+            control_plane_node_label,
+            replace="kube-ovn/role",
         )
+        self.set_replicas(kube_ovn_monitor, len(node_ips))
 
         self.apply_manifest(resources, "kube-ovn.yaml")
 
@@ -236,8 +241,10 @@ class KubeOvnCharm(CharmBase):
         ovn_central = self.get_resource(
             resources, kind="Deployment", name="ovn-central"
         )
-        self.replace_node_selector(
-            ovn_central, self.model.config["control-plane-node-label"], "kube-ovn/role"
+        self.set_node_selector(
+            ovn_central,
+            self.model.config["control-plane-node-label"],
+            replace="kube-ovn/role",
         )
         self.set_replicas(ovn_central, len(node_ips))
 
@@ -283,8 +290,8 @@ class KubeOvnCharm(CharmBase):
             },
         )
         self.replace_images(resources, registry)
-        self.replace_node_selector(
-            speaker, speaker_config.node_selector, "ovn.kubernetes.io/bgp"
+        self.set_node_selector(
+            speaker, speaker_config.node_selector, replace="ovn.kubernetes.io/bgp"
         )
         self.replace_name(speaker, speaker_config.name)
         self.apply_manifest(resources, f"{speaker_config.name}.speaker.yaml")
@@ -617,13 +624,6 @@ class KubeOvnCharm(CharmBase):
                             [registry] + container["image"].split("/")[-2:]
                         )
 
-    def replace_node_selector(self, resource, new_label, key_to_replace):
-        label_key, label_value = new_label.split("=")
-
-        node_selector = resource["spec"]["template"]["spec"]["nodeSelector"]
-        del node_selector[key_to_replace]
-        node_selector[label_key] = label_value
-
     def replace_name(self, resource, new_name):
         resource["metadata"]["name"] = new_name
 
@@ -658,6 +658,14 @@ class KubeOvnCharm(CharmBase):
     def set_active_status(self):
         if self.stored.kube_ovn_configured:
             self.unit.status = ActiveStatus()
+
+    def set_node_selector(self, resource, new_label, replace=None):
+        label_key, label_value = new_label.split("=")
+
+        node_selector = resource["spec"]["template"]["spec"]["nodeSelector"]
+        if replace and replace in node_selector:
+            del node_selector[replace]
+        node_selector[label_key] = label_value
 
     def set_replicas(self, resource, replicas):
         resource["spec"]["replicas"] = replicas
