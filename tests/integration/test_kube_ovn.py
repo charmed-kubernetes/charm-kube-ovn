@@ -248,14 +248,14 @@ async def test_pod_netem_limit(ops_test, client, iperf3_pods, annotate):
         annotate(pod, limit_annotation)
 
     log.info("Looking for kubernetes-worker/0 netem interface ...")
-    juju_cmd = "run --unit kubernetes-worker/0 -- ip link"
+    juju_cmd = "exec --unit kubernetes-worker/0 -- ip link"
     _, stdout, __ = await ops_test.juju(
         *shlex.split(juju_cmd), fail_msg="Failed to run ip link"
     )
 
     interface = parse_ip_link(stdout)
     log.info(f"Checking qdisk on interface {interface} for correct limit ...")
-    juju_cmd = f"run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
+    juju_cmd = f"exec --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
     _, stdout, __ = await ops_test.juju(
         *shlex.split(juju_cmd), fail_msg="Failed to run tc qdisc show"
     )

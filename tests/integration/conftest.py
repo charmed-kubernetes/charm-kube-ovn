@@ -77,12 +77,12 @@ def worker_node(client):
 
 @pytest.fixture(scope="module")
 async def gateway_server(ops_test):
-    cmd = "run --unit ubuntu/0 -- sudo apt install -y iperf3"
+    cmd = "exec --unit ubuntu/0 -- sudo apt install -y iperf3"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to install iperf3: {(stdout or stderr).strip()}"
 
     iperf3_cmd = "iperf3 -s --daemon"
-    cmd = f"juju run --unit ubuntu/0 -- {iperf3_cmd}"
+    cmd = f"juju exec --unit ubuntu/0 -- {iperf3_cmd}"
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 server: {(stdout or stderr).strip()}"
 
@@ -768,24 +768,24 @@ async def bird_container_ip(ops_test, bird):
     bird_app = ops_test.model.applications["bird"]
     bird_unit = bird_app.units[0]
 
-    cmd = f"run --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
+    cmd = f"exec --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to enable IP forwarding: {(stdout or stderr).strip()}"
 
-    cmd = f"run --unit {bird_unit.name} -- sudo apt install -y jq"
+    cmd = f"exec --unit {bird_unit.name} -- sudo apt install -y jq"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to install jq: {(stdout or stderr).strip()}"
 
     log.info(f"Creating ubuntu container on bird unit {bird_unit.name}")
-    cmd = f"run --unit {bird_unit.name} -- sudo lxd init --auto"
+    cmd = f"exec --unit {bird_unit.name} -- sudo lxd init --auto"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to initialize lxd: {(stdout or stderr).strip()}"
 
-    cmd = f"run --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
+    cmd = f"exec --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to launch ubuntu container: {(stdout or stderr).strip()}"
 
-    cmd = f'run --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
+    cmd = f'exec --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to get container IP: {(stdout or stderr).strip()}"
 

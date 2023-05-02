@@ -37,7 +37,7 @@ class Prometheus:
         api_path = "-/ready"
         uri = "{}/{}".format(self.base_uri, api_path)
 
-        cmd = f"run --unit ubuntu/0 -- curl {uri}"
+        cmd = f"exec --unit ubuntu/0 -- curl {uri}"
         rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
         if rc != 0:
             return ""
@@ -51,7 +51,7 @@ class Prometheus:
         api_path = "api/v1/label/__name__/values"
         uri = "{}/{}".format(self.base_uri, api_path)
         cmd = (
-            f"run --unit ubuntu/0 -- curl -XGET -G '{uri}' "
+            f"exec --unit ubuntu/0 -- curl -XGET -G '{uri}' "
             '--data-urlencode \'match[]={__name__=~".+", job!="prometheus"}\''
         )
         rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
