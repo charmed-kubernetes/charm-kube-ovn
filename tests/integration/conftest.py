@@ -40,7 +40,7 @@ def pytest_addoption(parser):
 async def kubeconfig(ops_test):
     kubeconfig_path = ops_test.tmp_path / "kubeconfig"
     rc, stdout, stderr = await ops_test.run(
-        "juju", "ssh", "kubernetes-control-plane/leader", "--", "cat", "kubeconfig"
+        "juju", "ssh", "kubernetes-control-plane/leader", "--", "cat", "config"
     )
     if rc != 0:
         log.error(f"retcode: {rc}")
