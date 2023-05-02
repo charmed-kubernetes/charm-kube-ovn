@@ -57,7 +57,9 @@ async def test_build_and_deploy(ops_test: OpsTest):
         f"--overlay={f}" for f in overlays
     )
 
-    await ops_test.juju(*shlex.split(juju_cmd), fail_msg="Bundle deploy failed")
+    await ops_test.juju(
+        *shlex.split(juju_cmd), check=True, fail_msg="Bundle deploy failed"
+    )
     await ops_test.model.block_until(
         lambda: "kube-ovn" in ops_test.model.applications, timeout=60
     )
