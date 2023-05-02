@@ -5,6 +5,7 @@ from grafana import Grafana
 from prometheus import Prometheus
 import asyncio
 import shlex
+import shutil
 import pytest
 import logging
 import json
@@ -38,7 +39,12 @@ async def test_build_and_deploy(ops_test: OpsTest):
     log.info("Build charm...")
     charm = await ops_test.build_charm(".")
 
-    plugin_path = Path.cwd() / "plugins/kubectl-ko"
+    # Juju 3.x CLI doesn't have read access to
+    # /opt/github-runner/_work/charm-kube-ovn/charm-kube-ovn/plugins/kubectl-ko
+    # on GH runners. Copy it into ops_test.tmp_path which should be readable
+    plugin_src = Path.cwd() / "plugins/kubectl-ko"
+    plugin_path = ops_test.tmp_path / "kubectl-ko"
+    shutil.copy(str(plugin_src), str(plugin_path))
 
     overlays = [
         ops_test.Bundle("kubernetes-core", channel="1.27/stable"),
