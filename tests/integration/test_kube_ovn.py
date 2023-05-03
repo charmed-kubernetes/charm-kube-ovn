@@ -10,6 +10,7 @@ import pytest
 import logging
 import json
 import re
+import time
 from contextlib import suppress
 
 from ipaddress import ip_address, ip_network
@@ -577,13 +578,56 @@ async def run_bird_curl_test(ops_test, unit, ip_to_curl):
 
 
 @pytest.mark.usefixtures("bird")
-async def test_bgp(ops_test, ips_to_curl):
+@pytest.mark.parametrize("scope", ["pod", "subnet"])
+async def test_bgp(ops_test, kubectl, kubectl_get, scope):
+    template_path = Path.cwd() / "tests/data/test-bgp.yaml"
+    template = template_path.read_text()
+    manifest = ops_test.tmp_path / "test-bgp.yaml"
+    manifest_data = template.format(
+        pod_annotations='annotations: {ovn.kubernetes.io/bgp: "true"}'
+        if scope == "pod"
+        else "",
+        subnet_annotations='annotations: {ovn.kubernetes.io/bgp: "true"}'
+        if scope == "subnet"
+        else "",
+    )
+    manifest.write_text(manifest_data)
+
+    async def cleanup():
+        await kubectl("delete", "--ignore-not-found", "-f", manifest)
+
+    await cleanup()
+
+    await kubectl("apply", "-f", manifest)
+    ips_to_curl = []
+    deadline = time.time() + 600
+
+    while time.time() < deadline:
+        pod = await kubectl_get("po", "-n", "test-bgp", "nginx")
+        pod_ip = pod.get("status", {}).get("podIP")
+        if pod_ip:
+            ips_to_curl.append(pod_ip)
+            break
+        log.info("Waiting for nginx pod IP")
+        await asyncio.sleep(1)
+
+    while time.time() < deadline:
+        svc = await kubectl_get("svc", "-n", "test-bgp", "nginx")
+        svc_ip = svc.get("spec", {}).get("clusterIP")
+        if svc_ip:
+            ips_to_curl.append(svc_ip)
+            break
+        log.info("Waiting for nginx svc IP")
+        await asyncio.sleep(1)
+
     log.info("Verifying the following IPs are reachable from bird units ...")
     log.info(ips_to_curl)
     bird_app = ops_test.model.applications["bird"]
     for unit in bird_app.units:
         for ip in ips_to_curl:
             assert await run_bird_curl_test(ops_test, unit, ip)
+
+    await cleanup()
 
 
 async def test_network_policies(ops_test, client, kubectl_exec, network_policies):

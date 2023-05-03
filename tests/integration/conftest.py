@@ -265,6 +265,16 @@ def kubectl_exec(kubectl):
 
 
 @pytest.fixture(scope="module")
+def kubectl_get(kubectl):
+    async def f(*args, **kwargs):
+        args = ["get", "-o", "json"] + list(args)
+        output = await kubectl(*args, **kwargs)
+        return json.loads(output)
+
+    return f
+
+
+@pytest.fixture(scope="module")
 async def k8s_storage(kubectl):
     await kubectl("apply", "-f", "tests/data/vsphere-storageclass.yaml")
 
@@ -833,35 +843,6 @@ async def external_gateway_pod(ops_test, client, subnet_resource):
     log.info("Deleting external-gateway related resources ...")
     for obj in codecs.load_all_yaml(path.read_text()):
         client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
-
-
-@pytest_asyncio.fixture(params=["pods", "subnet", "service"])
-async def ips_to_curl(request, nginx_pods, nginx_cluster_ip, annotate, kubectl):
-    if request.param == "pods":
-        for nginx_pod in nginx_pods():
-            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
-        log.info("Using annotated pod IPs ...")
-        yield [pod.status.podIP for pod in nginx_pods()]
-        for nginx_pod in nginx_pods():
-            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
-
-    if request.param == "subnet":
-        # For some reason lightkube is having trouble annotating the custom subnet resource, so using kubectl instead
-        # Lightkube doesn't fail, it just doesn't seem to apply the annotation
-        shcmd = (
-            "annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true"
-        )
-        log.info("Annotating default subnet with ovn.kubernetes.io/bgp=true ...")
-        await kubectl(*shlex.split(shcmd))
-        log.info("Using annotated subnet pod IPs ...")
-        yield [pod.status.podIP for pod in nginx_pods()]
-        log.info("Removing ovn.kubernetes.io/bgp annotation from default subnet ...")
-        shcmd = "annotate subnet ovn-default ovn.kubernetes.io/bgp- --overwrite=true"
-        await kubectl(*shlex.split(shcmd))
-
-    if request.param == "service":
-        log.info("Using service IP ...")
-        yield [nginx_cluster_ip]
 
 
 @pytest.fixture(scope="module")
