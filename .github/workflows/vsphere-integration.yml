@@ -21,12 +21,7 @@ jobs:
           credentials-yaml: ${{ secrets.CREDENTIALS_YAML }}
           clouds-yaml: ${{ secrets.CLOUDS_YAML }}
           bootstrap-constraints: "arch=amd64 cores=2 mem=4G"
-          # JAMMY_BOOTSTRAP_OPTIONS comes with an old VM template, with an old
-          # Linux kernel, that causes problems for Kube-OVN. Drop it until the
-          # template is updated.
-          #bootstrap-options: "${{ secrets.JAMMY_BOOTSTRAP_OPTIONS }} --model-default datastore=vsanDatastore --model-default primary-network=VLAN_2763 --config caas-image-repo=rocks.canonical.com/cdk/jujusolutions"
-          bootstrap-options: "--model-default test-mode=true --model-default logging-config='<root>=DEBUG' --model-default datastore=vsanDatastore --model-default primary-network=VLAN_2763 --config bootstrap-timeout=3600 --config caas-image-repo=rocks.canonical.com/cdk/jujusolutions"
-
+          bootstrap-options: "${{ secrets.JAMMY_BOOTSTRAP_OPTIONS }} --model-default datastore=vsanDatastore --model-default primary-network=VLAN_2763 --config caas-image-repo=rocks.canonical.com/cdk/jujusolutions"
       - name: Run test
         run: tox -e integration -- --basetemp=/home/ubuntu/pytest
       - name: Setup Debug Artifact Collection
