@@ -379,7 +379,11 @@ async def multi_nic_ipam(kubectl, kubectl_exec):
     try:
         yield ip_addr_output
     finally:
-        await kubectl("delete", "-f", manifest_path)
+        # net-attach-def needs to be deleted last since kube-ovn-controller
+        # depends on it to properly clean up the pod and subnet
+        await kubectl("delete", "pod", "test-multi-nic-ipam")
+        await kubectl("delete", "subnet", "test-multi-nic-ipam")
+        await kubectl("delete", "net-attach-def", "test-multi-nic-ipam")
 
 
 @pytest.mark.usefixtures("multus_installed")
