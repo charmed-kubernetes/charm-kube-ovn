@@ -275,17 +275,12 @@ def kubectl_get(kubectl):
 
 
 @pytest.fixture(scope="module")
-async def k8s_storage(kubectl):
-    await kubectl("apply", "-f", "tests/data/vsphere-storageclass.yaml")
-
-
-@pytest.fixture(scope="module")
 def module_name(request):
     return request.module.__name__.replace("_", "-")
 
 
 @pytest.fixture(scope="module")
-async def k8s_cloud(k8s_storage, kubeconfig, module_name, ops_test, request):
+async def k8s_cloud(kubeconfig, module_name, ops_test, request):
     """Use an existing k8s-cloud or create a k8s-cloud
     for deploying a new k8s model into"""
     cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
