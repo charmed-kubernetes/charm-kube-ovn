@@ -581,6 +581,7 @@ async def run_bird_curl_test(ops_test, unit, ip_to_curl):
         raise BGPError(f"failed to reach {ip_to_curl} from {unit.name}")
 
 
+@pytest.mark.xfail(reason="https://github.com/kubeovn/kube-ovn/issues/2533")
 @pytest.mark.usefixtures("bird")
 @pytest.mark.parametrize("scope", ["pod", "subnet"])
 async def test_bgp(ops_test, kubectl, kubectl_get, scope):
@@ -695,6 +696,7 @@ async def run_external_ping_test(kubectl_exec, external_gateway_pod, bird_contai
         )
 
 
+@pytest.mark.xfail(reason="https://github.com/kubeovn/kube-ovn/issues/2533")
 async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl_exec):
     # This tests that a pod in a subnet configured with an external gateway can reach
     # an LXD container running on a BIRD unit
