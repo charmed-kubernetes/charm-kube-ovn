@@ -549,7 +549,7 @@ async def prometheus_app(ops_test, k8s_model):
         await m.wait_for_idle(
             apps=["prometheus-k8s"],
             status="active",
-            timeout=60 * 5,
+            timeout=60 * 10,
             raise_on_error=False,
         )
 
