@@ -1,6 +1,5 @@
 from typing import Optional
-import shlex
-import json
+import requests
 
 
 class Prometheus:
@@ -23,25 +22,13 @@ class Prometheus:
     async def is_ready(self) -> bool:
         """Send a request to check readiness.
         Returns:
-          True if Prometheus is ready (returned 'Prometheus is Ready.'); False otherwise.
-        """
-        res = await self.health()
-        return "Prometheus is Ready." in res
-
-    async def health(self) -> str:
-        """A convenience method which queries the API to see whether Prometheus is ready
-           to serve traffic (i.e. respond to queries).
-        Returns:
-            Empty :str: if it is not up, otherwise a str containing "Prometheus is Ready"
+          True if Prometheus is ready (-/ready returns response code 200); False
+          otherwise.
         """
         api_path = "-/ready"
         uri = "{}/{}".format(self.base_uri, api_path)
-
-        cmd = f"exec --unit ubuntu/0 -- curl {uri}"
-        rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
-        if rc != 0:
-            return ""
-        return stdout
+        response = requests.get(uri)
+        return response.status_code == 200
 
     async def metrics_all(self) -> list:
         """Try to get all metrics reported to Prometheus by Kube-OVN components.
@@ -50,12 +37,7 @@ class Prometheus:
         """
         api_path = "api/v1/label/__name__/values"
         uri = "{}/{}".format(self.base_uri, api_path)
-        cmd = (
-            f"exec --unit ubuntu/0 -- curl -XGET -G '{uri}' "
-            '--data-urlencode \'match[]={__name__=~".+", job!="prometheus"}\''
-        )
-        rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
-        assert (
-            rc == 0
-        ), f"Failed to curl Prometheus HTTP API: {(stdout or stderr).strip()}"
-        return json.loads(stdout)["data"]
+        params = {"match[]": ['{__name__=~".+", job!="prometheus"}']}
+        response = requests.get(uri, params=params)
+        response.raise_for_status()
+        return response.json()["data"]
