@@ -419,8 +419,8 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     log.info("Waiting for metrics...")
     await asyncio.sleep(60)
     metrics = await prometheus.metrics_all()
-
-    assert set(expected_prometheus_metrics).issubset(set(metrics))
+    missing_metrics = set(expected_prometheus_metrics) - set(metrics)
+    assert not missing_metrics, f"Missing expected metrics: {missing_metrics}"
 
 
 class TCPDumpError(Exception):
