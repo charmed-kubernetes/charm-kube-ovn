@@ -1,5 +1,6 @@
 from typing import Optional
 import requests
+import traceback
 
 
 class Prometheus:
@@ -27,8 +28,12 @@ class Prometheus:
         """
         api_path = "-/ready"
         uri = "{}/{}".format(self.base_uri, api_path)
-        response = requests.get(uri)
-        return response.status_code == 200
+        try:
+            response = requests.get(uri)
+            return response.status_code == 200
+        except Exception:
+            traceback.print_exc()
+            return False
 
     async def metrics_all(self) -> list:
         """Try to get all metrics reported to Prometheus by Kube-OVN components.
