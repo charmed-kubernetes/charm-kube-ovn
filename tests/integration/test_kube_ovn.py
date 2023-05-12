@@ -550,6 +550,19 @@ async def test_pod_mirror(ops_test, nginx_pods, annotate):
                     filter=f"dst {pod_ip} and port 80",
                 )
                 annotate(pod, {"ovn.kubernetes.io/mirror": "true"})
+
+                # Need to stop curling for at least 11 seconds to allow existing
+                # flows to expire. Otherwise, the traffic may never start to
+                # mirror. See https://github.com/kubeovn/kube-ovn/issues/2801
+                log.warning(
+                    "Working around https://github.com/kubeovn/kube-ovn/issues/2801"
+                )
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                await asyncio.sleep(20)
+                task = asyncio.ensure_future(repeated_curl(unit, pod_ip, 1))
+
                 assert await run_tcpdump_test(
                     ops_test,
                     unit,
