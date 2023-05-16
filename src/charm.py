@@ -193,7 +193,7 @@ class KubeOvnCharm(CharmBase):
             )
         else:
             # Only enable the mirror if a mirror interface is also provided
-            cni_args_to_replace["--enable-mirror"] = str(enable_global_mirror).lower()
+            cni_args_to_replace["--enable-mirror"] = json.dumps(enable_global_mirror)
         self.replace_container_args(cni_server_container, args=cni_args_to_replace)
 
         cni_args_to_add = {}
