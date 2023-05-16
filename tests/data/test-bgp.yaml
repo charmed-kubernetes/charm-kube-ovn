@@ -1,0 +1,44 @@
+kind: Subnet
+apiVersion: kubeovn.io/v1
+metadata:
+  name: test-bgp
+  {subnet_annotations}
+spec:
+  cidrBlock: 172.30.0.0/16
+  natOutgoing: false
+  namespaces:
+  - test-bgp
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test-bgp
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  namespace: test-bgp
+  labels:
+    app: nginx
+  {pod_annotations}
+spec:
+  containers:
+  - name: nginx
+    image: rocks.canonical.com/cdk/nginx:1.18
+    ports:
+    - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: test-bgp
+  annotations:
+    ovn.kubernetes.io/bgp: "true"
+spec:
+  ports:
+  - port: 80
+    protocol: TCP
+  selector:
+    app: nginx
