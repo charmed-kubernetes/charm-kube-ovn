@@ -804,8 +804,11 @@ def test_grafana_dashboards(harness):
 
 
 @pytest.mark.parametrize("leader", [True, False])
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=True)
 @mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
-def test_remote_write_consumer_changed(apply_grafana_agent, harness, leader):
+def test_remote_write_consumer_changed(
+    apply_grafana_agent, mock_kubeconfig, harness, leader
+):
     harness.set_leader(leader)
     rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
     harness.add_relation_unit(rel_id, "prometheus/0")
@@ -830,19 +833,115 @@ def test_remote_write_consumer_changed(apply_grafana_agent, harness, leader):
         apply_grafana_agent.assert_not_called()
 
 
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=False)
+@mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
+def test_remote_write_consumer_changed_kubeconfig_unavailable(
+    apply_grafana_agent,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.disable_hooks()
+    harness.begin()
+    rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
+    harness.add_relation_unit(rel_id, "prometheus/0")
+    remote_write_data = {"url": "prometheus.local:8080/api/v1"}
+    harness.update_relation_data(
+        rel_id,
+        "prometheus/0",
+        {"remote_write": json.dumps(remote_write_data)},
+    )
+    mock_event = mock.MagicMock()
+
+    charm = harness.charm
+    charm.remote_write_consumer_changed(mock_event)
+
+    assert harness.charm.remote_write_consumer.endpoints == [remote_write_data]
+
+    apply_grafana_agent.assert_not_called()
+    mock_event.defer.assert_called_once()
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=True)
+@mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
+def test_remote_write_consumer_changed_exception(
+    apply_grafana_agent,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.disable_hooks()
+    harness.begin()
+    rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
+    harness.add_relation_unit(rel_id, "prometheus/0")
+    remote_write_data = {"url": "prometheus.local:8080/api/v1"}
+    harness.update_relation_data(
+        rel_id,
+        "prometheus/0",
+        {"remote_write": json.dumps(remote_write_data)},
+    )
+    mock_event = mock.MagicMock()
+
+    charm = harness.charm
+    apply_grafana_agent.side_effect = CalledProcessError(1, "foo")
+    charm.remote_write_consumer_changed(mock_event)
+
+    assert harness.charm.remote_write_consumer.endpoints == [remote_write_data]
+
+    mock_event.defer.assert_called_once()
+
+
 @pytest.mark.parametrize("leader", [True, False])
 @mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
 def test_on_send_remote_write_departed(remove_grafana_agent, harness, leader):
     harness.set_leader(leader)
     harness.begin_with_initial_hooks()
     harness.charm.stored = ops.framework.StoredState()
-    harness.charm.stored.grafana_agent_configured = leader
-    harness.charm.on_send_remote_write_departed("mock_event")
+    harness.charm.stored.grafana_agent_configured = True
+    mock_event = mock.MagicMock()
+    harness.charm.on_send_remote_write_departed(mock_event)
 
     if leader:
         remove_grafana_agent.called_once()
     else:
         remove_grafana_agent.assert_not_called()
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=False)
+@mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
+def test_on_send_remote_write_departed_kubeconfig_unavailable(
+    mock_remove,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.begin_with_initial_hooks()
+    harness.charm.stored = ops.framework.StoredState()
+    harness.charm.stored.grafana_agent_configured = True
+    mock_event = mock.MagicMock()
+    harness.charm.on_send_remote_write_departed(mock_event)
+
+    mock_event.defer.assert_called_once()
+    mock_remove.assert_not_called()
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=True)
+@mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
+def test_on_send_remote_write_departed_exception(
+    mock_remove,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.begin_with_initial_hooks()
+    harness.charm.stored = ops.framework.StoredState()
+    harness.charm.stored.grafana_agent_configured = True
+    mock_event = mock.MagicMock()
+    mock_remove.side_effect = CalledProcessError(1, "cmd")
+    harness.charm.on_send_remote_write_departed(mock_event)
+
+    mock_event.defer.assert_called_once()
+    mock_remove.assert_called_once()
 
 
 @mock.patch("charm.KubeOvnCharm.patch_prometheus_resources")
