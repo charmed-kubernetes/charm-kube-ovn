@@ -524,8 +524,22 @@ class KubeOvnCharm(CharmBase):
         self.remove_kubectl_plugin("kubectl-ko")
 
     def on_send_remote_write_departed(self, event):
+        self.unit.status = MaintenanceStatus("Deploying Grafana Agent")
+        if not self.is_kubeconfig_available():
+            log.info(
+                "Unable to remove Grafana Agent resources Kubernetes API unavailable."
+            )
+            event.defer()
+            return
+
         if self.stored.grafana_agent_configured and self.unit.is_leader():
-            self.remove_grafana_agent()
+            try:
+                self.remove_grafana_agent()
+                self.set_active_status()
+            except CalledProcessError:
+                log.exception("Failed to remove Grafana Agent resources, will retry.")
+                event.defer()
+                return
 
     def on_update_status(self, _):
         if not self.stored.kube_ovn_configured:
@@ -553,10 +567,23 @@ class KubeOvnCharm(CharmBase):
                 patch_file,
             )
 
-    def remote_write_consumer_changed(self, _):
+    def remote_write_consumer_changed(self, event):
+        self.unit.status = MaintenanceStatus("Deploying Grafana Agent")
+        if not self.is_kubeconfig_available():
+            log.info(
+                "Unable to apply Grafana Agent manifest Kubernetes API unavailable."
+            )
+            event.defer()
+            return
+
         if self.remote_write_consumer.endpoints and self.unit.is_leader():
-            # Get the last available endpoint reported in the relation data.
-            self.apply_grafana_agent(self.remote_write_consumer.endpoints)
+            try:
+                self.apply_grafana_agent(self.remote_write_consumer.endpoints)
+                self.set_active_status()
+            except CalledProcessError:
+                log.exception("Failed to apply Grafana Agent manifest, will retry.")
+                event.defer()
+                return
 
     def remove_grafana_agent(self):
         self.patch_prometheus_resources(
