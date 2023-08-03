@@ -42,7 +42,7 @@ class Grafana:
         api_path = "api/health"
         uri = "{}/{}".format(self.base_uri, api_path)
 
-        cmd = f"exec --unit ubuntu/0 -- curl {uri} -u {self.username}:{self.pw}"
+        cmd = f"exec --unit ubuntu/0 -- curl -s {uri} -u {self.username}:{self.pw}"
         rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
         assert rc == 0, f"Failed to curl health endpoint: {(stdout or stderr).strip()}"
         return json.loads(stdout)
@@ -54,7 +54,7 @@ class Grafana:
         """
         api_path = "api/search"
         uri = "{}/{}".format(self.base_uri, api_path)
-        cmd = f"exec --unit ubuntu/0 -- curl {uri}?starred=false -u {self.username}:{self.pw}"
+        cmd = f"exec --unit ubuntu/0 -- curl -s {uri}?starred=false -u {self.username}:{self.pw}"
         rc, stdout, stderr = await self.ops_test.juju(*shlex.split(cmd))
         assert (
             rc == 0
