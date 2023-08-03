@@ -40,17 +40,15 @@ def pytest_addoption(parser):
 async def kubeconfig(ops_test):
     kubeconfig_path = ops_test.tmp_path / "kubeconfig"
     rc, stdout, stderr = await ops_test.run(
-        "juju",
-        "scp",
-        "kubernetes-control-plane/leader:/home/ubuntu/config",
-        kubeconfig_path,
+        "juju", "ssh", "kubernetes-control-plane/leader", "--", "cat", "config"
     )
     if rc != 0:
         log.error(f"retcode: {rc}")
         log.error(f"stdout:\n{stdout.strip()}")
         log.error(f"stderr:\n{stderr.strip()}")
         pytest.fail("Failed to copy kubeconfig from kubernetes-control-plane")
-    assert Path(kubeconfig_path).stat().st_size, "kubeconfig file is 0 bytes"
+    assert stdout, "kubeconfig file is 0 bytes"
+    kubeconfig_path.write_text(stdout)
     yield kubeconfig_path
 
 
@@ -79,12 +77,12 @@ def worker_node(client):
 
 @pytest.fixture(scope="module")
 async def gateway_server(ops_test):
-    cmd = "run --unit ubuntu/0 -- sudo apt install -y iperf3"
+    cmd = "exec --unit ubuntu/0 -- sudo apt install -y iperf3"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to install iperf3: {(stdout or stderr).strip()}"
 
     iperf3_cmd = "iperf3 -s --daemon"
-    cmd = f"juju run --unit ubuntu/0 -- {iperf3_cmd}"
+    cmd = f"juju exec --unit ubuntu/0 -- {iperf3_cmd}"
     rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
     assert rc == 0, f"Failed to run iperf3 server: {(stdout or stderr).strip()}"
 
@@ -267,8 +265,13 @@ def kubectl_exec(kubectl):
 
 
 @pytest.fixture(scope="module")
-async def k8s_storage(kubectl):
-    await kubectl("apply", "-f", "tests/data/vsphere-storageclass.yaml")
+def kubectl_get(kubectl):
+    async def f(*args, **kwargs):
+        args = ["get", "-o", "json"] + list(args)
+        output = await kubectl(*args, **kwargs)
+        return json.loads(output)
+
+    return f
 
 
 @pytest.fixture(scope="module")
@@ -277,7 +280,7 @@ def module_name(request):
 
 
 @pytest.fixture(scope="module")
-async def k8s_cloud(k8s_storage, kubeconfig, module_name, ops_test, request):
+async def k8s_cloud(kubeconfig, module_name, ops_test, request):
     """Use an existing k8s-cloud or create a k8s-cloud
     for deploying a new k8s model into"""
     cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
@@ -546,7 +549,7 @@ async def prometheus_app(ops_test, k8s_model):
         await m.wait_for_idle(
             apps=["prometheus-k8s"],
             status="active",
-            timeout=60 * 5,
+            timeout=60 * 10,
             raise_on_error=False,
         )
 
@@ -770,24 +773,24 @@ async def bird_container_ip(ops_test, bird):
     bird_app = ops_test.model.applications["bird"]
     bird_unit = bird_app.units[0]
 
-    cmd = f"run --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
+    cmd = f"exec --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to enable IP forwarding: {(stdout or stderr).strip()}"
 
-    cmd = f"run --unit {bird_unit.name} -- sudo apt install -y jq"
+    cmd = f"exec --unit {bird_unit.name} -- sudo apt install -y jq"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to install jq: {(stdout or stderr).strip()}"
 
     log.info(f"Creating ubuntu container on bird unit {bird_unit.name}")
-    cmd = f"run --unit {bird_unit.name} -- sudo lxd init --auto"
+    cmd = f"exec --unit {bird_unit.name} -- sudo lxd init --auto"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to initialize lxd: {(stdout or stderr).strip()}"
 
-    cmd = f"run --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
+    cmd = f"exec --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to launch ubuntu container: {(stdout or stderr).strip()}"
 
-    cmd = f'run --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
+    cmd = f'exec --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to get container IP: {(stdout or stderr).strip()}"
 
@@ -835,35 +838,6 @@ async def external_gateway_pod(ops_test, client, subnet_resource):
     log.info("Deleting external-gateway related resources ...")
     for obj in codecs.load_all_yaml(path.read_text()):
         client.delete(type(obj), obj.metadata.name, namespace=obj.metadata.namespace)
-
-
-@pytest_asyncio.fixture(params=["pods", "subnet", "service"])
-async def ips_to_curl(request, nginx_pods, nginx_cluster_ip, annotate, kubectl):
-    if request.param == "pods":
-        for nginx_pod in nginx_pods():
-            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "true"})
-        log.info("Using annotated pod IPs ...")
-        yield [pod.status.podIP for pod in nginx_pods()]
-        for nginx_pod in nginx_pods():
-            annotate(nginx_pod, {"ovn.kubernetes.io/bgp": "false"})
-
-    if request.param == "subnet":
-        # For some reason lightkube is having trouble annotating the custom subnet resource, so using kubectl instead
-        # Lightkube doesn't fail, it just doesn't seem to apply the annotation
-        shcmd = (
-            "annotate subnet ovn-default ovn.kubernetes.io/bgp=true --overwrite=true"
-        )
-        log.info("Annotating default subnet with ovn.kubernetes.io/bgp=true ...")
-        await kubectl(*shlex.split(shcmd))
-        log.info("Using annotated subnet pod IPs ...")
-        yield [pod.status.podIP for pod in nginx_pods()]
-        log.info("Removing ovn.kubernetes.io/bgp annotation from default subnet ...")
-        shcmd = "annotate subnet ovn-default ovn.kubernetes.io/bgp- --overwrite=true"
-        await kubectl(*shlex.split(shcmd))
-
-    if request.param == "service":
-        log.info("Using service IP ...")
-        yield [nginx_cluster_ip]
 
 
 @pytest.fixture(scope="module")

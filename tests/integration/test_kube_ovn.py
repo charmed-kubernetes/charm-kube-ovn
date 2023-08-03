@@ -5,10 +5,12 @@ from grafana import Grafana
 from prometheus import Prometheus
 import asyncio
 import shlex
+import shutil
 import pytest
 import logging
 import json
 import re
+import time
 from contextlib import suppress
 
 from ipaddress import ip_address, ip_network
@@ -38,10 +40,15 @@ async def test_build_and_deploy(ops_test: OpsTest):
     log.info("Build charm...")
     charm = await ops_test.build_charm(".")
 
-    plugin_path = Path.cwd() / "plugins/kubectl-ko"
+    # Juju 3.x CLI doesn't have read access to
+    # /opt/github-runner/_work/charm-kube-ovn/charm-kube-ovn/plugins/kubectl-ko
+    # on GH runners. Copy it into ops_test.tmp_path which should be readable
+    plugin_src = Path.cwd() / "plugins/kubectl-ko"
+    plugin_path = ops_test.tmp_path / "kubectl-ko"
+    shutil.copy(str(plugin_src), str(plugin_path))
 
     overlays = [
-        ops_test.Bundle("kubernetes-core", channel="1.25/stable"),
+        ops_test.Bundle("kubernetes-core", channel="1.27/stable"),
         Path("tests/data/charm.yaml"),
         Path("tests/data/vsphere-overlay.yaml"),
     ]
@@ -57,7 +64,9 @@ async def test_build_and_deploy(ops_test: OpsTest):
         f"--overlay={f}" for f in overlays
     )
 
-    await ops_test.juju(*shlex.split(juju_cmd), fail_msg="Bundle deploy failed")
+    await ops_test.juju(
+        *shlex.split(juju_cmd), check=True, fail_msg="Bundle deploy failed"
+    )
     await ops_test.model.block_until(
         lambda: "kube-ovn" in ops_test.model.applications, timeout=60
     )
@@ -246,14 +255,14 @@ async def test_pod_netem_limit(ops_test, client, iperf3_pods, annotate):
         annotate(pod, limit_annotation)
 
     log.info("Looking for kubernetes-worker/0 netem interface ...")
-    juju_cmd = "run --unit kubernetes-worker/0 -- ip link"
+    juju_cmd = "exec --unit kubernetes-worker/0 -- ip link"
     _, stdout, __ = await ops_test.juju(
         *shlex.split(juju_cmd), fail_msg="Failed to run ip link"
     )
 
     interface = parse_ip_link(stdout)
     log.info(f"Checking qdisk on interface {interface} for correct limit ...")
-    juju_cmd = f"run --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
+    juju_cmd = f"exec --unit kubernetes-worker/0 -- tc qdisc show dev {interface}"
     _, stdout, __ = await ops_test.juju(
         *shlex.split(juju_cmd), fail_msg="Failed to run tc qdisc show"
     )
@@ -353,7 +362,11 @@ async def multi_nic_ipam(kubectl, kubectl_exec):
     try:
         yield ip_addr_output
     finally:
-        await kubectl("delete", "-f", manifest_path)
+        # net-attach-def needs to be deleted last since kube-ovn-controller
+        # depends on it to properly clean up the pod and subnet
+        await kubectl("delete", "pod", "test-multi-nic-ipam")
+        await kubectl("delete", "subnet", "test-multi-nic-ipam")
+        await kubectl("delete", "net-attach-def", "test-multi-nic-ipam")
 
 
 class TCPDumpError(Exception):
@@ -483,6 +496,19 @@ async def test_pod_mirror(ops_test, nginx_pods, annotate):
                     filter=f"dst {pod_ip} and port 80",
                 )
                 annotate(pod, {"ovn.kubernetes.io/mirror": "true"})
+
+                # Need to stop curling for at least 11 seconds to allow existing
+                # flows to expire. Otherwise, the traffic may never start to
+                # mirror. See https://github.com/kubeovn/kube-ovn/issues/2801
+                log.warning(
+                    "Working around https://github.com/kubeovn/kube-ovn/issues/2801"
+                )
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+                await asyncio.sleep(20)
+                task = asyncio.ensure_future(repeated_curl(unit, pod_ip, 1))
+
                 assert await run_tcpdump_test(
                     ops_test,
                     unit,
@@ -515,13 +541,56 @@ async def run_bird_curl_test(ops_test, unit, ip_to_curl):
 
 
 @pytest.mark.usefixtures("bird")
-async def test_bgp(ops_test, ips_to_curl):
+@pytest.mark.parametrize("scope", ["pod", "subnet"])
+async def test_bgp(ops_test, kubectl, kubectl_get, scope):
+    template_path = Path.cwd() / "tests/data/test-bgp.yaml"
+    template = template_path.read_text()
+    manifest = ops_test.tmp_path / "test-bgp.yaml"
+    manifest_data = template.format(
+        pod_annotations='annotations: {ovn.kubernetes.io/bgp: "true"}'
+        if scope == "pod"
+        else "",
+        subnet_annotations='annotations: {ovn.kubernetes.io/bgp: "true"}'
+        if scope == "subnet"
+        else "",
+    )
+    manifest.write_text(manifest_data)
+
+    async def cleanup():
+        await kubectl("delete", "--ignore-not-found", "-f", manifest)
+
+    await cleanup()
+
+    await kubectl("apply", "-f", manifest)
+    ips_to_curl = []
+    deadline = time.time() + 600
+
+    while time.time() < deadline:
+        pod = await kubectl_get("po", "-n", "test-bgp", "nginx")
+        pod_ip = pod.get("status", {}).get("podIP")
+        if pod_ip:
+            ips_to_curl.append(pod_ip)
+            break
+        log.info("Waiting for nginx pod IP")
+        await asyncio.sleep(1)
+
+    while time.time() < deadline:
+        svc = await kubectl_get("svc", "-n", "test-bgp", "nginx")
+        svc_ip = svc.get("spec", {}).get("clusterIP")
+        if svc_ip:
+            ips_to_curl.append(svc_ip)
+            break
+        log.info("Waiting for nginx svc IP")
+        await asyncio.sleep(1)
+
     log.info("Verifying the following IPs are reachable from bird units ...")
     log.info(ips_to_curl)
     bird_app = ops_test.model.applications["bird"]
     for unit in bird_app.units:
         for ip in ips_to_curl:
             assert await run_bird_curl_test(ops_test, unit, ip)
+
+    await cleanup()
 
 
 async def test_network_policies(ops_test, client, kubectl_exec, network_policies):

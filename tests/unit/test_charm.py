@@ -75,7 +75,9 @@ def test_config_change(configure_kube_ovn, configure_cni_relation, charm, harnes
 def test_apply_crds(charm, kubectl):
     charm.apply_crds()
     assert charm.unit.status == MaintenanceStatus("Applying CRDs")
-    kubectl.assert_called_once_with(charm, "apply", "-f", "templates/crd.yaml")
+    kubectl.assert_called_once_with(
+        charm, "apply", "-f", "templates/kube-ovn/kube-ovn-crd.yaml"
+    )
 
 
 def test_restart_pods(charm, kubectl):
@@ -117,13 +119,13 @@ def test_restart_pods(charm, kubectl):
     )
 
 
-def test_replace_node_selector(harness, charm):
+def test_set_node_selector(harness, charm):
     config_dict = {"control-plane-node-label": "juju-charm=kubernetes-control-plane"}
     resource = dict(
         spec=dict(template=dict(spec=dict(nodeSelector={"kube-ovn/role": "deleteMe"})))
     )
-    charm.replace_node_selector(
-        resource, config_dict["control-plane-node-label"], "kube-ovn/role"
+    charm.set_node_selector(
+        resource, config_dict["control-plane-node-label"], replace="kube-ovn/role"
     )
     assert "juju-charm" in resource["spec"]["template"]["spec"]["nodeSelector"]
     assert "kube-ovn/role" not in resource["spec"]["template"]["spec"]["nodeSelector"]
@@ -283,8 +285,8 @@ def test_get_registry(harness, charm):
 def test_load_manifest(charm):
     with pytest.raises(FileNotFoundError):
         charm.load_manifest("bogus.yaml")
-    assert charm.load_manifest("kube-ovn.yaml")
-    assert charm.load_manifest("ovn.yaml")
+    assert charm.load_manifest("kube-ovn/kube-ovn.yaml")
+    assert charm.load_manifest("kube-ovn/ovn.yaml")
 
 
 def test_render_manifest(charm):
@@ -479,244 +481,124 @@ def test_add_container_args(charm):
     assert containers[1]["command"] == ["command", "-a", "--arg1=val1", "--arg2=val2"]
 
 
-@mock.patch("charm.KubeOvnCharm.load_manifest")
 @mock.patch("charm.KubeOvnCharm.get_ovn_node_ips")
-@mock.patch("charm.KubeOvnCharm.get_resource")
-@mock.patch("charm.KubeOvnCharm.get_container_resource")
-@mock.patch("charm.KubeOvnCharm.replace_images")
-@mock.patch("charm.KubeOvnCharm.replace_node_selector")
-@mock.patch("charm.KubeOvnCharm.replace_container_args")
-@mock.patch("charm.KubeOvnCharm.add_container_args")
 @mock.patch("charm.KubeOvnCharm.apply_manifest")
 def test_apply_kube_ovn(
     apply_manifest,
-    add_container_args,
-    replace_container_args,
-    replace_node_selector,
-    replace_images,
-    get_container_resource,
-    get_resource,
     get_ovn_node_ips,
-    load_manifest,
     charm,
     harness,
 ):
-    # Setup
-    harness.disable_hooks()
-    config_dict = {
-        "default-cidr": "172.22.0.0/16",
-        "default-gateway": "172.22.0.1",
-        "pinger-external-address": "10.152.183.1",
-        "pinger-external-dns": "1.1.1.1",
-        "node-switch-cidr": "100.64.0.0/16",
-        "node-switch-gateway": "100.64.0.1",
-        "enable-global-mirror": True,
-        "mirror-iface": "some-interface",
-    }
-    harness.update_config(config_dict)
-    node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
-    (
-        kube_ovn_controller,
-        kube_ovn_cni,
-        kube_ovn_pinger,
-        kube_ovn_monitor,
-    ) = get_resource.side_effect = [
-        mock.MagicMock(),
-        mock.MagicMock(),
-        mock.MagicMock(),
-        dict(spec=dict(replicas=None)),
-    ]
+    get_ovn_node_ips.return_value = ["1.1.1.1"]
 
-    (
-        kube_ovn_controller_container,
-        cni_server_container,
-        pinger_container,
-    ) = get_container_resource.side_effect = [
-        mock.MagicMock(),
-        mock.MagicMock(),
-        mock.MagicMock(),
-    ]
+    charm.apply_kube_ovn("10.152.183.0/24", DEFAULT_IMAGE_REGISTRY)
 
-    # Test Method
-    charm.apply_kube_ovn(
-        DEFAULT_SERVICE_CIDR, DEFAULT_IMAGE_REGISTRY
-    )  # Heavy mocking here suggests perhaps a refactor.
-
-    # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Kube-OVN resources")
 
-    load_manifest.assert_called_once_with("kube-ovn.yaml")
-    resources = load_manifest.return_value
+    apply_manifest.assert_called_once()
+    resources = apply_manifest.call_args.args[0]
+    assert len(apply_manifest.call_args.args) == 2
+    assert apply_manifest.call_args.args[1] == "kube-ovn.yaml"
 
-    get_ovn_node_ips.assert_called_once_with()
+    for resource in resources:
+        if resource["kind"] in ["Deployment", "DaemonSet", "StatefulSet"]:
+            pod_spec = resource["spec"]["template"]["spec"]
+            containers = pod_spec["containers"]
+            init_containers = pod_spec.get("initContainers", [])
+            for container in containers + init_containers:
+                assert container["image"].startswith(DEFAULT_IMAGE_REGISTRY)
 
-    replace_images.assert_called_once_with(resources, DEFAULT_IMAGE_REGISTRY)
-    get_resource.assert_has_calls(
-        [
-            mock.call(resources, kind="Deployment", name="kube-ovn-controller"),
-            mock.call(resources, kind="DaemonSet", name="kube-ovn-cni"),
-            mock.call(resources, kind="DaemonSet", name="kube-ovn-pinger"),
-            mock.call(resources, kind="Deployment", name="kube-ovn-monitor"),
-        ]
+    controller = charm.get_resource(
+        resources, kind="Deployment", name="kube-ovn-controller"
     )
-
-    get_container_resource.assert_has_calls(
-        [
-            mock.call(kube_ovn_controller, container_name="kube-ovn-controller"),
-            mock.call(kube_ovn_cni, container_name="cni-server"),
-            mock.call(kube_ovn_pinger, container_name="pinger"),
-        ]
+    controller_container = charm.get_container_resource(
+        controller, "kube-ovn-controller"
     )
-
-    replace_container_args.assert_has_calls(
-        [
-            mock.call(
-                kube_ovn_controller_container,
-                args={
-                    "--default-cidr": config_dict["default-cidr"],
-                    "--default-gateway": config_dict["default-gateway"],
-                    "--service-cluster-ip-range": DEFAULT_SERVICE_CIDR,
-                    "--node-switch-cidr": config_dict["node-switch-cidr"],
-                },
-            ),
-            mock.call(
-                cni_server_container,
-                args={
-                    "--service-cluster-ip-range": DEFAULT_SERVICE_CIDR,
-                    "--enable-mirror": True,
-                },
-            ),
-            mock.call(
-                pinger_container,
-                args={
-                    "--external-address": config_dict["pinger-external-address"],
-                    "--external-dns": config_dict["pinger-external-dns"],
-                },
-            ),
-        ]
-    )
-
-    add_container_args.assert_has_calls(
-        [
-            mock.call(
-                kube_ovn_controller_container,
-                args={"--node-switch-gateway": config_dict["node-switch-gateway"]},
-            ),
-            mock.call(
-                cni_server_container,
-                args={"--mirror-iface": "some-interface"},
-            ),
-        ]
-    )
-
-    replace_node_selector.assert_called_once_with(
-        kube_ovn_monitor,
-        harness.charm.config["control-plane-node-label"],
-        "kube-ovn/role",
-    )
-    assert kube_ovn_monitor["spec"]["replicas"] == len(node_ips)
-
-    apply_manifest.assert_called_once_with(resources, "kube-ovn.yaml")
-
-    # Test invalid mirror config path
-    replace_container_args.reset_mock()
-    add_container_args.reset_mock()
-    (
-        kube_ovn_controller,
-        kube_ovn_cni,
-        kube_ovn_pinger,
-        kube_ovn_monitor,
-    ) = get_resource.side_effect = [
-        mock.MagicMock(),
-        mock.MagicMock(),
-        mock.MagicMock(),
-        dict(spec=dict(replicas=None)),
-    ]
-
-    (
-        kube_ovn_controller_container,
-        cni_server_container,
-        pinger_container,
-    ) = get_container_resource.side_effect = [
-        mock.MagicMock(),
-        mock.MagicMock(),
-        mock.MagicMock(),
-    ]
-    config_dict = {
-        "default-cidr": "172.22.0.0/16",
-        "default-gateway": "172.22.0.1",
-        "pinger-external-address": "10.152.183.1",
-        "pinger-external-dns": "1.1.1.1",
-        "node-switch-cidr": "100.64.0.0/16",
-        "node-switch-gateway": "100.64.0.1",
-        "mirror-iface": "",
-        "enable-global-mirror": True,
+    controller_args = controller_container["args"]
+    controller_env = {
+        var["name"]: var["value"]
+        for var in controller_container["env"]
+        if "value" in var
     }
-    harness.update_config(config_dict)
-    charm.apply_kube_ovn(DEFAULT_SERVICE_CIDR, DEFAULT_IMAGE_REGISTRY)
-    assert charm.unit.status == BlockedStatus(
-        "If enable-global-mirror is true, mirror-iface must be set"
+    cni = charm.get_resource(resources, kind="DaemonSet", name="kube-ovn-cni")
+    cni_container = charm.get_container_resource(cni, "cni-server")
+    cni_args = cni_container["args"]
+    pinger = charm.get_resource(resources, kind="DaemonSet", name="kube-ovn-pinger")
+    pinger_container = charm.get_container_resource(pinger, "pinger")
+    pinger_args = pinger_container["args"]
+    monitor = charm.get_resource(resources, kind="Deployment", name="kube-ovn-monitor")
+
+    assert controller["spec"]["replicas"] == 1
+    assert (
+        controller["spec"]["template"]["spec"]["nodeSelector"]["juju-application"]
+        == "kubernetes-control-plane"
     )
-    replace_container_args.assert_has_calls(
-        [
-            mock.call(
-                cni_server_container,
-                args={"--service-cluster-ip-range": DEFAULT_SERVICE_CIDR},
-            ),
-        ]
+    assert "--default-cidr=192.168.0.0/16" in controller_args
+    assert "--default-gateway=192.168.0.1" in controller_args
+    assert "--service-cluster-ip-range=10.152.183.0/24" in controller_args
+    assert "--node-switch-cidr=100.64.0.0/16" in controller_args
+    assert "--node-switch-gateway=100.64.0.1" in controller_args
+    assert controller_env["OVN_DB_IPS"] == "1.1.1.1"
+    assert "--service-cluster-ip-range=10.152.183.0/24" in cni_args
+    assert "--enable-mirror=false" in cni_args
+    assert "--external-address=8.8.8.8" in pinger_args
+    assert "--external-dns=google.com" in pinger_args
+    assert monitor["spec"]["replicas"] == 1
+    assert (
+        monitor["spec"]["template"]["spec"]["nodeSelector"]["juju-application"]
+        == "kubernetes-control-plane"
     )
 
 
-@mock.patch("charm.KubeOvnCharm.load_manifest")
 @mock.patch("charm.KubeOvnCharm.get_ovn_node_ips")
-@mock.patch("charm.KubeOvnCharm.get_resource")
-@mock.patch("charm.KubeOvnCharm.get_container_resource")
-@mock.patch("charm.KubeOvnCharm.replace_images")
-@mock.patch("charm.KubeOvnCharm.replace_node_selector")
-@mock.patch("charm.KubeOvnCharm.replace_container_env_vars")
 @mock.patch("charm.KubeOvnCharm.apply_manifest")
 def test_apply_ovn(
     apply_manifest,
-    replace_container_env_vars,
-    replace_node_selector,
-    replace_images,
-    get_container_resource,
-    get_resource,
     get_ovn_node_ips,
-    load_manifest,
     charm,
     harness,
 ):
-    node_ips = get_ovn_node_ips.return_value = ["1.1.1.1"]
-    ovn_central = get_resource.return_value = dict(spec=dict(replicas=None))
-    # Heavy mocking here suggests perhaps a refactor.
+    get_ovn_node_ips.return_value = ["1.1.1.1"]
+
     charm.apply_ovn(DEFAULT_IMAGE_REGISTRY)
 
     assert charm.unit.status == MaintenanceStatus("Applying OVN resources")
-    load_manifest.assert_called_once_with("ovn.yaml")
-    resources = load_manifest.return_value
 
-    get_ovn_node_ips.assert_called_once_with()
+    apply_manifest.assert_called_once()
+    resources = apply_manifest.call_args.args[0]
+    assert len(apply_manifest.call_args.args) == 2
+    assert apply_manifest.call_args.args[1] == "ovn.yaml"
 
-    replace_images.assert_called_once_with(resources, DEFAULT_IMAGE_REGISTRY)
-    get_resource.assert_called_once_with(
-        resources, kind="Deployment", name="ovn-central"
+    for resource in resources:
+        if resource["kind"] in ["Deployment", "DaemonSet", "StatefulSet"]:
+            pod_spec = resource["spec"]["template"]["spec"]
+            containers = pod_spec["containers"]
+            init_containers = pod_spec.get("initContainers", [])
+            for container in containers + init_containers:
+                assert container["image"].startswith(DEFAULT_IMAGE_REGISTRY)
+
+    ovn_central = charm.get_resource(resources, kind="Deployment", name="ovn-central")
+    ovn_central_container = charm.get_container_resource(ovn_central, "ovn-central")
+    ovn_central_container_env = {
+        var["name"]: var["value"]
+        for var in ovn_central_container["env"]
+        if "value" in var
+    }
+    ovs_ovn = charm.get_resource(resources, kind="DaemonSet", name="ovs-ovn")
+    openvswitch_container = charm.get_container_resource(ovs_ovn, "openvswitch")
+    openvswitch_container_env = {
+        var["name"]: var["value"]
+        for var in openvswitch_container["env"]
+        if "value" in var
+    }
+
+    assert ovn_central["spec"]["replicas"] == 1
+    assert (
+        ovn_central["spec"]["template"]["spec"]["nodeSelector"]["juju-application"]
+        == "kubernetes-control-plane"
     )
-
-    replace_node_selector.assert_called_once_with(
-        ovn_central, harness.charm.config["control-plane-node-label"], "kube-ovn/role"
-    )
-    assert ovn_central["spec"]["replicas"] == len(node_ips)
-
-    get_container_resource.assert_called_once_with(
-        ovn_central, container_name="ovn-central"
-    )
-    ovn_central_container = get_container_resource.return_value
-
-    replace_container_env_vars.assert_called_once_with(
-        ovn_central_container, env_vars={"NODE_IPS": ",".join(node_ips)}
-    )
-    apply_manifest.assert_called_once_with(resources, "ovn.yaml")
+    assert ovn_central_container_env["NODE_IPS"] == "1.1.1.1"
+    assert openvswitch_container_env["OVN_DB_IPS"] == "1.1.1.1"
 
 
 @pytest.mark.parametrize(
@@ -922,8 +804,11 @@ def test_grafana_dashboards(harness):
 
 
 @pytest.mark.parametrize("leader", [True, False])
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=True)
 @mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
-def test_remote_write_consumer_changed(apply_grafana_agent, harness, leader):
+def test_remote_write_consumer_changed(
+    apply_grafana_agent, mock_kubeconfig, harness, leader
+):
     harness.set_leader(leader)
     rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
     harness.add_relation_unit(rel_id, "prometheus/0")
@@ -948,19 +833,115 @@ def test_remote_write_consumer_changed(apply_grafana_agent, harness, leader):
         apply_grafana_agent.assert_not_called()
 
 
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=False)
+@mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
+def test_remote_write_consumer_changed_kubeconfig_unavailable(
+    apply_grafana_agent,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.disable_hooks()
+    harness.begin()
+    rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
+    harness.add_relation_unit(rel_id, "prometheus/0")
+    remote_write_data = {"url": "prometheus.local:8080/api/v1"}
+    harness.update_relation_data(
+        rel_id,
+        "prometheus/0",
+        {"remote_write": json.dumps(remote_write_data)},
+    )
+    mock_event = mock.MagicMock()
+
+    charm = harness.charm
+    charm.remote_write_consumer_changed(mock_event)
+
+    assert harness.charm.remote_write_consumer.endpoints == [remote_write_data]
+
+    apply_grafana_agent.assert_not_called()
+    mock_event.defer.assert_called_once()
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=True)
+@mock.patch("charm.KubeOvnCharm.apply_grafana_agent")
+def test_remote_write_consumer_changed_exception(
+    apply_grafana_agent,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.disable_hooks()
+    harness.begin()
+    rel_id = harness.add_relation("send-remote-write", "prometheus-k8s")
+    harness.add_relation_unit(rel_id, "prometheus/0")
+    remote_write_data = {"url": "prometheus.local:8080/api/v1"}
+    harness.update_relation_data(
+        rel_id,
+        "prometheus/0",
+        {"remote_write": json.dumps(remote_write_data)},
+    )
+    mock_event = mock.MagicMock()
+
+    charm = harness.charm
+    apply_grafana_agent.side_effect = CalledProcessError(1, "foo")
+    charm.remote_write_consumer_changed(mock_event)
+
+    assert harness.charm.remote_write_consumer.endpoints == [remote_write_data]
+
+    mock_event.defer.assert_called_once()
+
+
 @pytest.mark.parametrize("leader", [True, False])
 @mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
 def test_on_send_remote_write_departed(remove_grafana_agent, harness, leader):
     harness.set_leader(leader)
     harness.begin_with_initial_hooks()
     harness.charm.stored = ops.framework.StoredState()
-    harness.charm.stored.grafana_agent_configured = leader
-    harness.charm.on_send_remote_write_departed("mock_event")
+    harness.charm.stored.grafana_agent_configured = True
+    mock_event = mock.MagicMock()
+    harness.charm.on_send_remote_write_departed(mock_event)
 
     if leader:
         remove_grafana_agent.called_once()
     else:
         remove_grafana_agent.assert_not_called()
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=False)
+@mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
+def test_on_send_remote_write_departed_kubeconfig_unavailable(
+    mock_remove,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.begin_with_initial_hooks()
+    harness.charm.stored = ops.framework.StoredState()
+    harness.charm.stored.grafana_agent_configured = True
+    mock_event = mock.MagicMock()
+    harness.charm.on_send_remote_write_departed(mock_event)
+
+    mock_event.defer.assert_called_once()
+    mock_remove.assert_not_called()
+
+
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", return_value=True)
+@mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
+def test_on_send_remote_write_departed_exception(
+    mock_remove,
+    mock_kubeconfig,
+    harness,
+):
+    harness.set_leader(True)
+    harness.begin_with_initial_hooks()
+    harness.charm.stored = ops.framework.StoredState()
+    harness.charm.stored.grafana_agent_configured = True
+    mock_event = mock.MagicMock()
+    mock_remove.side_effect = CalledProcessError(1, "cmd")
+    harness.charm.on_send_remote_write_departed(mock_event)
+
+    mock_event.defer.assert_called_once()
+    mock_remove.assert_called_once()
 
 
 @mock.patch("charm.KubeOvnCharm.patch_prometheus_resources")
@@ -1056,7 +1037,7 @@ def test_patch_prometheus_resources(mock_render, charm, kubectl, remove):
 @mock.patch("charm.KubeOvnCharm.get_resource")
 @mock.patch("charm.KubeOvnCharm.get_container_resource")
 @mock.patch("charm.KubeOvnCharm.replace_images")
-@mock.patch("charm.KubeOvnCharm.replace_node_selector")
+@mock.patch("charm.KubeOvnCharm.set_node_selector")
 @mock.patch("charm.KubeOvnCharm.replace_name")
 @mock.patch("charm.KubeOvnCharm.add_container_args")
 @mock.patch("charm.KubeOvnCharm.replace_container_args")
@@ -1066,7 +1047,7 @@ def test_apply_speaker(
     replace_container_args,
     add_container_args,
     replace_name,
-    replace_node_selector,
+    set_node_selector,
     replace_images,
     get_container_resource,
     get_resource,
@@ -1099,7 +1080,7 @@ def test_apply_speaker(
     # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Speaker resource")
 
-    load_manifest.assert_called_once_with("speaker.yaml")
+    load_manifest.assert_called_once_with("kube-ovn/speaker.yaml")
     resources = load_manifest.return_value
     replace_images.assert_called_once_with(resources, DEFAULT_IMAGE_REGISTRY)
     get_resource.assert_called_once_with(
@@ -1127,8 +1108,10 @@ def test_apply_speaker(
         },
     )
 
-    replace_node_selector.assert_called_once_with(
-        kube_ovn_speaker, "juju-application=kubernetes-worker", "ovn.kubernetes.io/bgp"
+    set_node_selector.assert_called_once_with(
+        kube_ovn_speaker,
+        "juju-application=kubernetes-worker",
+        replace="ovn.kubernetes.io/bgp",
     )
     replace_name.assert_called_once_with(kube_ovn_speaker, "my-speaker")
     apply_manifest.assert_called_once_with(resources, "my-speaker.speaker.yaml")
