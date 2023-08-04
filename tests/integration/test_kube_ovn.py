@@ -48,7 +48,7 @@ async def test_build_and_deploy(ops_test: OpsTest):
     shutil.copy(str(plugin_src), str(plugin_path))
 
     overlays = [
-        ops_test.Bundle("kubernetes-core", channel="1.27/stable"),
+        ops_test.Bundle("kubernetes-core", channel="edge"),
         Path("tests/data/charm.yaml"),
         Path("tests/data/vsphere-overlay.yaml"),
     ]
@@ -654,6 +654,10 @@ async def run_external_ping_test(kubectl_exec, external_gateway_pod, bird_contai
         )
 
 
+async def test_setup_k8s_model(k8s_model):
+    assert False, "All is okay"
+
+
 async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl_exec):
     # This tests that a pod in a subnet configured with an external gateway can reach
     # an LXD container running on a BIRD unit
@@ -684,26 +688,31 @@ async def test_grafana(
         log.info("Waiting for Grafana to be ready ...")
         await asyncio.sleep(5)
     dashboards = await grafana.dashboards_all()
-    actual_dashboard_titles = []
-    for dashboard in dashboards:
-        actual_dashboard_titles.append(dashboard["title"])
+    actual_dashboard_titles = [dashboard["title"] for dashboard in dashboards]
 
     assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
 
 
 async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
     prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+
     while not await prometheus.is_ready():
         log.info("Waiting for Prometheus to be ready...")
         await asyncio.sleep(5)
-    log.info("Waiting for metrics...")
-    await asyncio.sleep(60)
-    metrics = await prometheus.metrics_all()
 
-    assert set(expected_prometheus_metrics).issubset(set(metrics))
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        wait=wait_fixed(30),
+        stop=stop_after_attempt(2),
+    )
+    async def gather_metrics():
+        metrics = await prometheus.metrics_all()
+        assert set(expected_prometheus_metrics).issubset(set(metrics))
+
+    await gather_metrics()
 
 
-@pytest.mark.usefixtures("multus_installed")
+@pytest.mark.usefixtures("k8s_model")
 async def test_multi_nic_ipam(multi_nic_ipam):
     ifaces = json.loads(multi_nic_ipam)
     iface_addrs = {
