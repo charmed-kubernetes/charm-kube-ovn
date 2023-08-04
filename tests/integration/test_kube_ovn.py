@@ -654,10 +654,6 @@ async def run_external_ping_test(kubectl_exec, external_gateway_pod, bird_contai
         )
 
 
-async def test_setup_k8s_model(k8s_model):
-    assert False, "All is okay"
-
-
 async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl_exec):
     # This tests that a pod in a subnet configured with an external gateway can reach
     # an LXD container running on a BIRD unit

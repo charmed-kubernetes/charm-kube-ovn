@@ -303,17 +303,6 @@ async def k8s_cloud(kubeconfig, module_name, ops_test, request):
         )
     yield cloud_name
 
-    with ops_test.model_context("main"):
-        log.info(f"Removing cloud '{cloud_name}'...")
-        await ops_test.juju(
-            "remove-cloud",
-            cloud_name,
-            "--controller",
-            ops_test.controller_name,
-            "--client",
-            check=True,
-        )
-
 
 @pytest.fixture(scope="module")
 async def k8s_model(k8s_cloud, ops_test):
