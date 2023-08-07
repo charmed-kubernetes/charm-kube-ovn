@@ -1,6 +1,5 @@
 import time
 import os
-from juju.tag import untag
 import asyncio
 import json
 import pytest
@@ -11,21 +10,24 @@ from pathlib import Path
 import yaml
 import shlex
 from lightkube import Client, codecs, KubeConfig
-from lightkube.resources.apps_v1 import DaemonSet
-from lightkube.resources.core_v1 import Pod
-from lightkube.resources.core_v1 import Namespace
-from lightkube.resources.core_v1 import Node
-from lightkube.resources.apps_v1 import Deployment
-from lightkube.resources.core_v1 import Service
+from lightkube.core.exceptions import ApiError, ObjectDeleted
+from lightkube.resources.apps_v1 import DaemonSet, Deployment
+from lightkube.resources.core_v1 import Namespace, Node, Pod, Service
 from lightkube.generic_resource import create_global_resource
 from lightkube.types import PatchType
 from random import choices
 from string import ascii_lowercase, digits
 from typing import Union, Tuple
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 
 log = logging.getLogger(__name__)
-GRAFANA_APP = "grafana-k8s"
+GRAFANA = "grafana-k8s"
 
 
 def pytest_addoption(parser):
@@ -304,12 +306,44 @@ async def k8s_cloud(kubeconfig, module_name, ops_test, request):
     yield cloud_name
 
 
+@retry(
+    retry=retry_if_exception_type(AssertionError),
+    stop=stop_after_delay(60 * 10),
+    wait=wait_fixed(1),
+)
+async def confirm_multus_installed(ops_test):
+    model = ops_test.model
+    model_name = ops_test.model_full_name
+    for unit in model.applications["kubernetes-worker"].units:
+        log.info(f"Confirming multus config on unit {unit.name}")
+        multus_match = "sudo ls /etc/cni/net.d | grep multus"
+        ssh_cmd = f"ssh -m {model_name} {unit.name} -- {multus_match}"
+        rc, *_ = await ops_test.juju(*shlex.split(ssh_cmd))
+        assert rc == 0, f"Multus not yet on {unit.name}"
+    log.info("Multus Installed")
+
+
+async def confirm_multus_removed(ops_test):
+    model = ops_test.model
+    model_name = ops_test.model_full_name
+    for unit in model.applications["kubernetes-worker"].units:
+        commands = (
+            "sudo rm -rf /etc/cni/net.d/multus.d",
+            "sudo rm -rf /etc/cni/net.d/00-multus.conf",
+        )
+        for command in commands:
+            ssh_cmd = f"ssh -m {model_name} {unit.name} -- {command}"
+            await ops_test.juju(*shlex.split(ssh_cmd))
+    log.info("Multus Removed")
+
+
 @pytest.fixture(scope="module")
-async def k8s_model(k8s_cloud, ops_test):
+async def k8s_model(k8s_cloud, ops_test, client: Client):
     model_alias = "k8s-model"
     model_name = "test-kube-ovn-" + "".join(choices(ascii_lowercase + digits, k=4))
     log.info(f"Creating k8s model {model_name}...")
     machine_model = ops_test.model
+    await confirm_multus_removed(ops_test)
     await ops_test.track_model(
         model_alias,
         model_name=model_name,
@@ -321,23 +355,17 @@ async def k8s_model(k8s_cloud, ops_test):
     saases = []
     try:
         with ops_test.model_context(model_alias) as k8s_model:
-            await k8s_model.deploy(entity_url="multus", trust=True, channel="edge")
-            await k8s_model.deploy(entity_url=GRAFANA_APP, trust=True, channel="edge")
-            await k8s_model.deploy(
-                entity_url="prometheus-k8s", trust=True, channel="edge"
-            )
-
-            model_owner = untag("user-", k8s_model.info.owner_tag)
-            await k8s_model.create_offer(f"{GRAFANA_APP}:grafana-dashboard")
-            saases.append(
-                await machine_model.consume(f"{model_owner}/{model_name}.{GRAFANA_APP}")
-            )
-            await k8s_model.create_offer("prometheus-k8s:receive-remote-write")
-            saases.append(
-                await machine_model.consume(
-                    f"{model_owner}/{model_name}.prometheus-k8s"
+            await asyncio.gather(
+                *(
+                    k8s_model.deploy(app, trust=True, channel="edge")
+                    for app in ("multus", GRAFANA, "prometheus-k8s")
                 )
             )
+            saas_model = f"{k8s_model.info.users[0].display_name}/{model_name}"
+            await k8s_model.create_offer(f"{GRAFANA}:grafana-dashboard")
+            await k8s_model.create_offer("prometheus-k8s:receive-remote-write")
+            saases.append(await machine_model.consume(f"{saas_model}.{GRAFANA}"))
+            saases.append(await machine_model.consume(f"{saas_model}.prometheus-k8s"))
 
             async with ops_test.fast_forward():
                 # The o11y charms like to error occasionally -- just wait for stable
@@ -346,34 +374,18 @@ async def k8s_model(k8s_cloud, ops_test):
                 )
 
             # the o11y charms seems to not evaluate their relations until after the units are active/idle
-            await machine_model.add_relation(
-                "kube-ovn", f"{GRAFANA_APP}:grafana-dashboard"
-            )
-            await machine_model.add_relation(
-                "kube-ovn", "prometheus-k8s:receive-remote-write"
-            )
+            await machine_model.relate("kube-ovn:grafana-dashboard", GRAFANA)
+            await machine_model.relate("kube-ovn:send-remote-write", "prometheus-k8s")
             async with ops_test.fast_forward():
                 await k8s_model.wait_for_idle(
                     status="active", timeout=60 * 5, raise_on_error=False
                 )
 
-        deadline = time.time() + 60 * 10
-        for unit in ops_test.model.applications["kubernetes-worker"].units:
-            log.info("waiting 10m for Multus config on unit %s" % unit.name)
-            multus_match = "sudo ls /etc/cni/net.d | grep multus"
-            ssh_cmd = f"ssh -m {ops_test.model_full_name} {unit.name} -- {multus_match}"
-            while time.time() < deadline:
-                rc, *_ = await ops_test.juju(*shlex.split(ssh_cmd))
-                if rc == 0:
-                    break
-                await asyncio.sleep(1)
-            else:
-                pytest.fail(
-                    "timed out waiting for Multus config on unit %s" % unit.name
-                )
-
+        await confirm_multus_installed(ops_test)
         async with ops_test.fast_forward():
-            await machine_model.wait_for_idle(status="active", timeout=60 * 5)
+            await machine_model.wait_for_idle(status="active", timeout=60 * 10)
+
+        log.info("K8s model Ready")
 
         yield model_alias
     finally:
@@ -384,16 +396,18 @@ async def k8s_model(k8s_cloud, ops_test):
             await k8s_model.remove_offer(f"{model_name}.{saas}", force=True)
 
         await ops_test.forget_model(model_alias, timeout=5 * 60, allow_failure=False)
-        for unit in ops_test.model.applications["kubernetes-worker"].units:
-            commands = (
-                "sudo rm -rf /etc/cni/net.d/multus.d",
-                "sudo rm -rf /etc/cni/net.d/00-multus.conf",
-            )
-            for command in commands:
-                ssh_cmd = f"ssh -m {ops_test.model_full_name} {unit.name} -- {command}"
-                await ops_test.juju(*shlex.split(ssh_cmd))
+        await confirm_multus_removed(ops_test)
 
-        log.info("Model Removed")
+    log.info("Confirming k8s model is delete...")
+    try:
+        client.get(Namespace, model_name)
+        client.wait(Namespace, model_name, for_conditions=[])
+    except (ObjectDeleted, ApiError):
+        log.info("Confirmed...")
+
+    async with ops_test.fast_forward():
+        log.info("Confirming machine model is stable...")
+        await machine_model.wait_for_idle(status="active", timeout=60 * 10)
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
@@ -411,7 +425,7 @@ def wait_daemonset(client: Client, namespace, name, pods_ready):
 async def grafana_password(ops_test, k8s_model):
     with ops_test.model_context(k8s_model):
         action = (
-            await ops_test.model.applications[GRAFANA_APP]
+            await ops_test.model.applications[GRAFANA]
             .units[0]
             .run_action("get-admin-password")
         )
@@ -534,65 +548,62 @@ def default_subnet(client, subnet_resource):
 
 @pytest_asyncio.fixture(scope="module")
 async def bird(ops_test):
-    async with ops_test.fast_forward():
-        await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=3)
-        await ops_test.model.block_until(
-            lambda: "bird" in ops_test.model.applications, timeout=60
-        )
-        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=3)
+    await ops_test.model.block_until(
+        lambda: "bird" in ops_test.model.applications, timeout=60
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
     log.info("Bird deployment complete")
 
     bird_app = ops_test.model.applications["bird"]
     kube_ovn_app = ops_test.model.applications["kube-ovn"]
     worker_app = ops_test.model.applications["kubernetes-worker"]
 
-    async with ops_test.fast_forward():
-        log.info("Configuring Kube-OVN to peer with Bird")
-        await kube_ovn_app.set_config(
-            {
-                "bgp-speakers": yaml.dump(
-                    [
-                        {
-                            "name": f'test-speaker-{bird_unit.name.replace("/", "-")}',
-                            "node-selector": f"kubernetes.io/hostname={worker_unit.machine.hostname}",
-                            "neighbor-address": bird_unit.public_address,
-                            "neighbor-as": 64512,
-                            "cluster-as": 64512,
-                            "announce-cluster-ip": True,
-                            "log-level": 5,
-                        }
-                        for (bird_unit, worker_unit) in zip(
-                            bird_app.units, worker_app.units
-                        )
-                    ]
-                )
-            }
-        )
-        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    log.info("Configuring Kube-OVN to peer with Bird")
+    await kube_ovn_app.set_config(
+        {
+            "bgp-speakers": yaml.dump(
+                [
+                    {
+                        "name": f'test-speaker-{bird_unit.name.replace("/", "-")}',
+                        "node-selector": f"kubernetes.io/hostname={worker_unit.machine.hostname}",
+                        "neighbor-address": bird_unit.public_address,
+                        "neighbor-as": 64512,
+                        "cluster-as": 64512,
+                        "announce-cluster-ip": True,
+                        "log-level": 5,
+                    }
+                    for (bird_unit, worker_unit) in zip(
+                        bird_app.units, worker_app.units
+                    )
+                ]
+            )
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
-        log.info("Configuring Bird to peer with Kube-OVN")
-        await bird_app.set_config(
-            {
-                "bgp-peers": yaml.dump(
-                    [
-                        {"address": unit.public_address, "as-number": 64512}
-                        for unit in worker_app.units
-                    ]
-                )
-            }
-        )
-        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    log.info("Configuring Bird to peer with Kube-OVN")
+    await bird_app.set_config(
+        {
+            "bgp-peers": yaml.dump(
+                [
+                    {"address": unit.public_address, "as-number": 64512}
+                    for unit in worker_app.units
+                ]
+            )
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
     yield
 
-    async with ops_test.fast_forward():
-        log.info("Setting empty bgp-speakers config ...")
-        await kube_ovn_app.set_config(
-            {
-                "bgp-speakers": "",
-            }
-        )
-        await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
+    log.info("Setting empty bgp-speakers config ...")
+    await kube_ovn_app.set_config(
+        {
+            "bgp-speakers": "",
+        }
+    )
+    await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
     cmd = "remove-application bird --force"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
