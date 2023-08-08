@@ -7,6 +7,13 @@ OVN_NB_POD=
 OVN_SB_POD=
 KUBE_OVN_VERSION=
 REGISTRY="kubeovn"
+OVN_NORTHD_POD=
+PERF_TIMES=5
+PERF_LABEL="PerfTest"
+CONN_CHECK_LABEL="conn-check"
+CONN_CHECK_SERVER="conn-check-server"
+PERF_GC_COMMAND=()
+LAST_PERF_FAILED_LOG=""
 
 showHelp(){
   echo "kubectl ko {subcommand} [option...]"
@@ -22,10 +29,11 @@ showHelp(){
   echo "  trace ...    trace ovn microflow of specific packet"
   echo "    trace {namespace/podname} {target ip address} [target mac address] {icmp|tcp|udp} [target tcp/udp port]    trace ICMP/TCP/UDP"
   echo "    trace {namespace/podname} {target ip address} [target mac address] arp {request|reply}                     trace ARP request/reply"
-  echo "  diagnose {all|node} [nodename]    diagnose connectivity of all nodes or a specific node"
+  echo "  diagnose {all|node|subnet|IPPorts} [nodename|subnetName|{proto1}-{IP1}-{Port1},{proto2}-{IP2}-{Port2}]    diagnose connectivity of all nodes or a specific node or specify subnet's ds pod or IPPorts like 'tcp-172.18.0.2-53,udp-172.18.0.3-53'"
   echo "  env-check    check the environment configuration"
   echo "  tuning {install-fastpath|local-install-fastpath|remove-fastpath|install-stt|local-install-stt|remove-stt} {centos7|centos8}} [kernel-devel-version]    deploy kernel optimisation components to the system"
   echo "  reload    restart all kube-ovn components"
+  echo "  perf [image] performance test default image is kubeovn/test:v1.12.0"
 }
 
 # usage: ipv4_to_hex 192.168.0.1
@@ -471,7 +479,114 @@ checkLeader(){
   echo "ovn-$component leader check ok"
 }
 
+applyConnServerDaemonset(){
+  subnetName=$1
+
+  if [ $(kubectl get subnet $subnetName | wc -l) -eq 0 ]; then
+    echo "no subnet $subnetName exists !!"
+    exit 1
+  fi
+
+  imageID=$(kubectl get ds -n $KUBE_OVN_NS kube-ovn-pinger -o jsonpath={.spec.template.spec.containers[0].image})
+  tmpFileName="conn-server.yaml"
+  cat <<EOF > $tmpFileName
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: $subnetName-$CONN_CHECK_SERVER
+  namespace: $KUBE_OVN_NS
+  labels:
+    app: $CONN_CHECK_LABEL
+spec:
+  selector:
+    matchLabels:
+      app: $CONN_CHECK_LABEL
+  template:
+    metadata:
+      annotations:
+        ovn.kubernetes.io/logical_switch: $subnetName
+      labels:
+        app: $CONN_CHECK_LABEL
+    spec:
+      serviceAccountName: ovn
+      containers:
+        - name: $subnetName-$CONN_CHECK_SERVER
+          imagePullPolicy: IfNotPresent
+          image: $imageID
+          command:
+            - /kube-ovn/kube-ovn-pinger
+          args:
+            - --enable-verbose-conn-check=true
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+EOF
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+
+  isfailed=true
+  for i in {0..59}
+  do
+    if kubectl wait pod --for=condition=Ready -l app=$CONN_CHECK_LABEL -n $KUBE_OVN_NS 2> /dev/null; then
+      isfailed=false
+      break
+    fi
+    sleep 1; \
+  done
+
+  if $isfailed; then
+    echo "Error ds $subnetName-$CONN_CHECK_SERVER pod not ready"
+    return
+  fi
+}
+
+applyTestNodePortService() {
+  local svcName="test-node-port"
+  tmpFileName="$svcName.yaml"
+
+  cat <<EOF > $tmpFileName
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: $CONN_CHECK_LABEL
+  name: $svcName
+  namespace: $KUBE_OVN_NS
+spec:
+  type: NodePort
+  ports:
+    - port: 60001
+      protocol: TCP
+      targetPort: 8080
+      name: kube-ovn-pinger
+  selector:
+    app: kube-ovn-pinger
+EOF
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+}
+
+getTestNodePortServiceIPPorts() {
+
+  targetIPPorts=""
+  nodeIPs=($(kubectl get node -o wide | grep -v "INTERNAL-IP" | awk '{print $6}'))
+  nodePort=$(kubectl get svc test-node-port -n $KUBE_OVN_NS -o 'jsonpath={.spec.ports[0].nodePort}')
+  for nodeIP in "${nodeIPs[@]}"
+  do
+    if [ -z "$targetIPPorts" ]; then
+      targetIPPorts="tcp-$nodeIP-$nodePort"
+    else
+      targetIPPorts="$targetIPPorts,tcp-$nodeIP-$nodePort"
+    fi
+  done
+  echo "$targetIPPorts"
+}
+
+
 diagnose(){
+  gcCommands=()
   kubectl get crd vpcs.kubeovn.io
   kubectl get crd vpc-nat-gateways.kubeovn.io
   kubectl get crd subnets.kubeovn.io
@@ -511,7 +626,25 @@ diagnose(){
   checkLeader sb
   checkLeader northd
 
+  quitDiagnose() {
+    if [ ! ${#gcCommands[@]} -eq 0 ]; then
+      for item in "${gcCommands[@]}"
+      do
+          echo $item
+          eval "$item"
+      done
+    fi
+  }
+  trap quitDiagnose EXIT
+
   type="$1"
+
+  if [[ $type != "IPPorts" ]]; then
+    gcCommands+=("kubectl delete svc -l app=$CONN_CHECK_LABEL -n $KUBE_OVN_NS")
+    applyTestNodePortService
+    targetIPPorts=$(getTestNodePortServiceIPPorts)
+  fi
+
   case $type in
     all)
       echo "### kube-ovn-controller recent log"
@@ -534,7 +667,7 @@ diagnose(){
         kubectl exec -n $KUBE_OVN_NS "$pinger" -- ovs-vsctl show
         echo ""
         echo "#### pinger diagnose results:"
-        kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job
+        kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --external-address=114.114.114.114,2400:3200::1 --target-ip-ports=$targetIPPorts
         echo "### finish diagnose node $nodeName"
         echo ""
       done
@@ -554,13 +687,41 @@ diagnose(){
       echo "#### ovs-vswitchd log:"
       kubectl exec -n $KUBE_OVN_NS "$pinger" -- tail /var/log/openvswitch/ovs-vswitchd.log
       echo ""
-      kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job
+      kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --external-address=114.114.114.114,2400:3200::1 --target-ip-ports=$targetIPPorts
       echo "### finish diagnose node $nodeName"
       echo ""
       ;;
+    subnet)
+      subnetName="$2"
+      gcCommands+=("kubectl delete ds -l app=$CONN_CHECK_LABEL -n $KUBE_OVN_NS")
+      applyConnServerDaemonset $subnetName
+
+      if [ $(kubectl get ds kube-ovn-cni -n $KUBE_OVN_NS -oyaml | grep enable-verbose-conn-check | wc -l) -eq 0 ]; then
+        echo "Warning: kube-ovn-cni not have args enable-verbose-conn-check, it will fail when check node tcp/udp connectivity"
+      fi
+
+      pingers=$(kubectl -n $KUBE_OVN_NS get po --no-headers -o custom-columns=NAME:.metadata.name -l app=kube-ovn-pinger)
+      for pinger in $pingers
+      do
+        echo "#### pinger $pinger on namespace $KUBE_OVN_NS diagnose results:"
+        kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --ds-name=$subnetName-$CONN_CHECK_SERVER --ds-namespace=$KUBE_OVN_NS --enable-verbose-conn-check=true --external-address=114.114.114.114,2400:3200::1 --target-ip-ports=$targetIPPorts
+        echo ""
+      done
+      ;;
+    IPPorts)
+      targetIPPorts="$2"
+
+      pingers=$(kubectl -n $KUBE_OVN_NS get po --no-headers -o custom-columns=NAME:.metadata.name -l app=kube-ovn-pinger)
+      for pinger in $pingers
+      do
+        echo "#### pinger $pinger on namespace $KUBE_OVN_NS diagnose results:"
+        kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --target-ip-ports=$targetIPPorts
+        echo ""
+      done
+      ;;
     *)
       echo "type $type not supported"
-      echo "kubectl ko diagnose {all|node} [nodename]"
+      echo "kubectl ko diagnose {all|node|subnet|IPPorts} [nodename|subnetName|{proto1}-{IP1}-{Port1},{proto2}-{IP2}-{Port2}]"
       ;;
     esac
 }
@@ -578,6 +739,14 @@ getOvnCentralPod(){
       exit 1
     fi
     OVN_SB_POD=$SB_POD
+
+    NORTHD_POD=$(kubectl get pod -n kube-system -l ovn-northd-leader=true | grep ovn-central | head -n 1 | awk '{print $1}')
+    if [ -z "$NORTHD_POD" ]; then
+      echo "ovn northd not exists"
+      exit 1
+    fi
+    OVN_NORTHD_POD=$NORTHD_POD
+
     image=$(kubectl  -n kube-system get pods -l app=kube-ovn-cni -o jsonpath='{.items[0].spec.containers[0].image}')
     if [ -z "$image" ]; then
           echo "cannot get kube-ovn image"
@@ -941,6 +1110,414 @@ env-check(){
   done
 }
 
+applyTestServer() {
+  podName="test-server"
+  nodeID=$1
+  imageID=$2
+  tmpFileName="$podName.yaml"
+
+  cat <<EOF > $tmpFileName
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $podName
+  namespace: $KUBE_OVN_NS
+  labels:
+    app: $PERF_LABEL
+    env: server
+spec:
+  containers:
+    - name: $podName
+      image: $imageID
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
+      args:
+        - |
+          qperf &
+          ./test-server.sh
+  nodeSelector:
+    kubernetes.io/hostname: $nodeID
+EOF
+
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+}
+
+applyTestHostServer() {
+  podName="test-host-server"
+  nodeID=$1
+  imageID=$2
+  tmpFileName="$podName.yaml"
+
+  cat <<EOF > $tmpFileName
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $podName
+  namespace: $KUBE_OVN_NS
+  labels:
+    app: $PERF_LABEL
+spec:
+  hostNetwork: true
+  containers:
+    - name: $podName
+      image: $imageID
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
+      args:
+        - |
+          qperf &
+          ./test-server.sh
+  nodeSelector:
+    kubernetes.io/hostname: $nodeID
+EOF
+
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+}
+
+
+applyTestClient() {
+  local podName="test-client"
+  local nodeID=$1
+  local imageID=$2
+  tmpFileName="$podName.yaml"
+
+  cat <<EOF > $tmpFileName
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $podName
+  namespace: $KUBE_OVN_NS
+  labels:
+    app: $PERF_LABEL
+spec:
+  containers:
+    - name: $podName
+      image: $imageID
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep infinity"]
+  nodeSelector:
+    kubernetes.io/hostname: $nodeID
+EOF
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+}
+
+applyTestHostClient() {
+  local podName="test-host-client"
+  local nodeID=$1
+  local imageID=$2
+  tmpFileName="$podName.yaml"
+
+  cat <<EOF > $tmpFileName
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $podName
+  namespace: $KUBE_OVN_NS
+  labels:
+    app: $PERF_LABEL
+spec:
+  hostNetwork: true
+  containers:
+    - name: $podName
+      image: $imageID
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c", "sleep infinity"]
+  nodeSelector:
+    kubernetes.io/hostname: $nodeID
+EOF
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+}
+
+applyTestServerService() {
+  local svcName="test-server"
+  tmpFileName="$svcName.yaml"
+
+  cat <<EOF > $tmpFileName
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: $PERF_LABEL
+  name: $svcName
+  namespace: $KUBE_OVN_NS
+spec:
+  ports:
+    - port: 19765
+      protocol: UDP
+      targetPort: 19765
+      name: qperf-udp
+    - port: 5201
+      protocol: UDP
+      targetPort: 5201
+      name: iperf3-udp
+    - port: 19765
+      protocol: TCP
+      targetPort: 19765
+      name: qperf-tcp
+    - port: 5201
+      protocol: TCP
+      targetPort: 5201
+      name: iperf3-tcp
+  selector:
+    env: server
+EOF
+  kubectl apply -f $tmpFileName
+  rm $tmpFileName
+}
+
+addHeaderDecoration() {
+  local header="$1"
+  local decorator="="
+
+  local totalLength=100
+  local headerLength=${#header}
+  local decoratorLength=$(( (totalLength - headerLength - 2) / 2 ))
+
+  local leftDecorators=$(printf "%0.s${decorator}" $(seq 1 $decoratorLength))
+  local rightDecorators=$(printf "%0.s${decorator}" $(seq 1 $((totalLength - headerLength - decoratorLength - 2))))
+
+  printf "%s %s %s\n" "${leftDecorators}" "${header}" "${rightDecorators}"
+}
+
+addEndDecoration() {
+  echo "===================================================================================================="
+}
+
+quitPerfTest() {
+  if [ ! $? -eq 0 ]; then
+    addHeaderDecoration "Performance Test Failed with below: "
+    cat ./$LAST_PERF_FAILED_LOG
+    addEndDecoration
+  fi
+
+  addHeaderDecoration "Remove Performance Test Resource"
+  if [ ! ${#PERF_GC_COMMAND[@]} -eq 0 ]; then
+    for item in "${PERF_GC_COMMAND[@]}"
+    do
+        echo $item
+        eval "$item"
+    done
+  fi
+  kubectl delete pods -l app=$PERF_LABEL -n $KUBE_OVN_NS
+  kubectl delete svc -l app=$PERF_LABEL -n $KUBE_OVN_NS
+
+  local pids=($(ps -ef | grep -v "kubectl exec" | grep "iperf -s -B 224.0.0.100 -i 1 -u" | grep -v grep | awk '{print $2}'))
+  if [ ! ${#pids[@]} -eq 0 ]; then
+    for pid in "${pids[@]}"; do
+      kill $pid
+    done
+  fi
+  addEndDecoration
+  exit 0
+}
+
+perf(){
+  addHeaderDecoration "Prepareing Performance Test Resources"
+  imageID=${1:-"kubeovn/test:v1.12.0"}
+
+  nodes=($(kubectl get node --no-headers -o custom-columns=NAME:.metadata.name))
+  if [[ ${#nodes} -eq 1 ]]; then
+    applyTestClient ${nodes[0]} $imageID
+    applyTestHostClient ${nodes[0]} $imageID
+    applyTestServer ${nodes[0]} $imageID
+    applyTestHostServer ${nodes[0]} $imageID
+  elif [[ ${#nodes} -le 0 ]]; then
+    echo "can't find node in the cluster"
+    return
+  elif [[ ${#nodes} -ge 2 ]]; then
+    applyTestClient ${nodes[1]} $imageID
+    applyTestHostClient ${nodes[1]} $imageID
+    applyTestServer ${nodes[0]} $imageID
+    applyTestHostServer ${nodes[0]} $imageID
+  fi
+
+  applyTestServerService
+
+  isfailed=true
+  for i in {0..300}
+  do
+    if kubectl wait pod --for=condition=Ready -l app=$PERF_LABEL -n kube-system 2>/dev/null ; then
+      isfailed=false
+      break
+    fi
+		sleep 1; \
+	done
+
+  if $isfailed; then
+    echo "Error test pod not ready"
+    return
+  fi
+  addEndDecoration
+
+  local serverPodIP=$(kubectl get pod test-server -n $KUBE_OVN_NS -o jsonpath={.status.podIP})
+  local hostserverPodIP=$(kubectl get pod test-host-server -n $KUBE_OVN_NS -o jsonpath={.status.podIP})
+  local svcIP=$(kubectl get svc test-server -n $KUBE_OVN_NS -o jsonpath={.spec.clusterIP})
+
+  trap quitPerfTest EXIT
+
+  addHeaderDecoration "Start Pod Network Unicast Performance Test"
+  unicastPerfTest test-client $serverPodIP
+  addEndDecoration
+
+  addHeaderDecoration "Start Host Network Performance Test"
+  unicastPerfTest test-host-client $hostserverPodIP
+  addEndDecoration
+
+  addHeaderDecoration "Start Service Network Performance Test"
+  unicastPerfTest test-client $svcIP $serverPodIP
+  addEndDecoration
+
+  addHeaderDecoration "Start Pod Multicast Network Performance Test"
+  multicastPerfTest
+  addEndDecoration
+
+  addHeaderDecoration "Start Host Multicast Network Performance"
+  multicastHostPerfTest
+  addEndDecoration
+
+  addHeaderDecoration "Start Leader Recover Time Test"
+  checkLeaderRecover
+  addEndDecoration
+}
+
+unicastPerfTest() {
+  clientPodName=$1
+  serverIP=$2
+  backendIP=${3:-""}
+  tmpFileName="unicast-$clientPodName.log"
+  PERF_GC_COMMAND+=("rm -f $tmpFileName")
+  LAST_PERF_FAILED_LOG=$tmpFileName
+
+  if [[ $backendIP != "" ]]; then
+    # qperf use other random tcp/udp port not only 19765
+    PERF_GC_COMMAND+=("kubectl ko nbctl lb-del test-server")
+    kubectl ko nbctl lb-add test-server $serverIP $backendIP
+    kubectl ko nbctl ls-lb-add ovn-default test-server
+  fi
+
+  printf "%-15s %-15s %-15s %-15s %-15s %-15s\n" "Size" "TCP Latency" "TCP Bandwidth" "UDP Latency" "UDP Lost Rate" "UDP Bandwidth"
+  for size in "64" "128" "512" "1k" "4k"
+  do
+    kubectl exec $clientPodName -n $KUBE_OVN_NS -- qperf -t $PERF_TIMES $serverIP -ub -oo msg_size:$size -vu tcp_lat udp_lat > $tmpFileName 2> /dev/null
+    formattedInput=$(cat $tmpFileName | tr -d '\n' | tr -s ' ')
+    tcpLat=$(echo $formattedInput | grep -oP 'tcp_lat: latency = \K[\d.]+ (us|ms|sec)')
+    udpLat=$(echo $formattedInput | grep -oP 'udp_lat: latency = \K[\d.]+ (us|ms|sec)')
+
+    kubectl exec $clientPodName -n $KUBE_OVN_NS -- iperf3 -c $serverIP -u -t $PERF_TIMES -i 1 -P 10 -b 1000G -l $size > $tmpFileName 2> /dev/null
+    udpBw=$(cat $tmpFileName | grep -oP '\d+\.?\d* [KMG]bits/sec' | tail -n 1)
+    udpLostRate=$(cat $tmpFileName | grep -oP '\(\d+(\.\d+)?%\)' | tail -n 1)
+
+    kubectl exec $clientPodName -n $KUBE_OVN_NS -- iperf3 -c $serverIP -t $PERF_TIMES -i 1 -P 10 -l $size > $tmpFileName 2> /dev/null
+    tcpBw=$(cat $tmpFileName | grep -oP '\d+\.?\d* [KMG]bits/sec' | tail -n 1)
+    printf "%-15s %-15s %-15s %-15s %-15s %-15s\n" "$size" "$tcpLat" "$tcpBw" "$udpLat" "$udpLostRate" "$udpBw"
+  done
+}
+
+getAddressNic() {
+  podName=$1
+  ipAddress=$2
+
+  interface=$(kubectl exec $podName -n $KUBE_OVN_NS -- ip -o addr show | awk '{split($4, a, "/"); print $2, a[1]}' | awk -v ip="$ipAddress" '$0 ~ ip {print $1}')
+  echo "$interface"
+}
+
+multicastHostPerfTest() {
+  clientNode=$(kubectl get pod test-host-client -n $KUBE_OVN_NS -o jsonpath={.spec.nodeName})
+  serverNode=$(kubectl get pod test-host-server -n $KUBE_OVN_NS -o jsonpath={.spec.nodeName})
+
+  clientHostIP=$(kubectl get pod test-host-client -n $KUBE_OVN_NS -o jsonpath={.status.hostIP})
+  serverHostIP=$(kubectl get pod test-host-server -n $KUBE_OVN_NS -o jsonpath={.status.hostIP})
+
+  clientNic=$(getAddressNic test-host-client $clientHostIP)
+  serverNic=$(getAddressNic test-host-server $serverHostIP)
+
+  clientovsPod=$(kubectl get pod -owide -A |grep ovs-ovn | grep $clientNode | awk '{print $2}')
+  PERF_GC_COMMAND+=("kubectl exec $clientovsPod -n kube-system -- ip maddr del 01:00:5e:00:00:64 dev $clientNic")
+  kubectl exec $clientovsPod -n kube-system -- ip maddr add 01:00:5e:00:00:64 dev $clientNic
+  serverovsPod=$(kubectl get pod -owide -A |grep ovs-ovn | grep $serverNode | awk '{print $2}')
+  PERF_GC_COMMAND+=("kubectl exec $serverovsPod -n kube-system -- ip maddr del 01:00:5e:00:00:64 dev $serverNic")
+  kubectl exec $serverovsPod -n kube-system -- ip maddr add 01:00:5e:00:00:64 dev $serverNic
+  genMulticastPerfResult test-host-server test-host-client
+}
+
+multicastPerfTest() {
+  clientNode=$(kubectl get pod test-client -n $KUBE_OVN_NS -o jsonpath={.spec.nodeName})
+  serverNode=$(kubectl get pod test-server -n $KUBE_OVN_NS -o jsonpath={.spec.nodeName})
+  clientNs=$(kubectl ko vsctl $clientNode --column=external_ids find interface external_ids:iface-id=test-client.$KUBE_OVN_NS | awk -F 'pod_netns=' '{print $2}' | grep -o 'cni-[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}')
+  serverNs=$(kubectl ko vsctl $serverNode --column=external_ids find interface external_ids:iface-id=test-server.$KUBE_OVN_NS | awk -F 'pod_netns=' '{print $2}' | grep -o 'cni-[0-9a-f]\{8\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{4\}-[0-9a-f]\{12\}')
+  clientovsPod=$(kubectl get pod -owide -A |grep ovs-ovn | grep $clientNode | awk '{print $2}')
+  kubectl exec $clientovsPod -n kube-system -- ip netns exec $clientNs ip maddr add 01:00:5e:00:00:64 dev eth0
+  serverovsPod=$(kubectl get pod -owide -A |grep ovs-ovn | grep $serverNode | awk '{print $2}')
+  kubectl exec $serverovsPod -n kube-system -- ip netns exec $serverNs ip maddr add 01:00:5e:00:00:64 dev eth0
+  genMulticastPerfResult test-server test-client
+}
+
+genMulticastPerfResult() {
+  serverName=$1
+  clientName=$2
+  tmpFileName="multicast-$serverName.log"
+  PERF_GC_COMMAND+=("rm -f $tmpFileName")
+  LAST_PERF_FAILED_LOG=$tmpFileName
+  
+  start_server_cmd="iperf -s -B 224.0.0.100 -i 1 -u"
+  kubectl exec $serverName -n $KUBE_OVN_NS -- $start_server_cmd > $tmpFileName &
+  sleep 1
+
+  printf "%-15s %-15s %-15s %-15s\n" "Size" "UDP Latency" "UDP Lost Rate" "UDP Bandwidth"
+  for size in "64" "128" "512" "1k" "4k"
+  do
+    kubectl exec $clientName -n $KUBE_OVN_NS -- iperf -c 224.0.0.100 -u -T 32 -t $PERF_TIMES -i 1 -b 1000G -l $size > /dev/null
+    udpBw=$(cat $tmpFileName | grep -oP '\d+\.?\d* [KMG]bits/sec' | tail -n 1)
+    udpLostRate=$(cat $tmpFileName |grep -oP '\(\d+(\.\d+)?%\)' | tail -n 1)
+    kubectl exec $clientName -n $KUBE_OVN_NS -- iperf -c 224.0.0.100 -u -T 32 -t $PERF_TIMES -i 1 -l $size > /dev/null
+    udpLat=$(cat $tmpFileName | grep -oP '\d+\.?\d* ms' | tail -n 1)
+    printf "%-15s %-15s %-15s %-15s\n" "$size" "$udpLat" "$udpLostRate" "$udpBw"
+  done
+}
+
+checkLeaderRecover() {
+  getOvnCentralPod
+  getPodRecoverTime "nb"
+  sleep 5
+  getOvnCentralPod
+  getPodRecoverTime "sb"
+  sleep 5
+  getOvnCentralPod
+  getPodRecoverTime "northd"
+
+}
+
+getPodRecoverTime(){
+  component_name=$1
+  start_time=$(date +%s.%N)
+  echo "Delete ovn central $component_name pod"
+  if [[ $component_name == "nb" ]]; then
+    kubectl delete pod $OVN_NB_POD -n kube-system
+  elif [[ $component_name == "sb" ]]; then
+    kubectl delete pod $OVN_SB_POD -n kube-system
+  elif [[ $component_name == "northd" ]]; then
+    kubectl delete pod $OVN_NORTHD_POD -n kube-system
+  fi
+  echo "Waiting for ovn central $component_name pod running"
+  replicas=$(kubectl get deployment -n kube-system ovn-central -o jsonpath={.spec.replicas})
+  availableNum=$(kubectl get deployment -n kube-system | grep ovn-central | awk {'print $4'})
+  while [ $availableNum != $replicas ]
+  do
+    availableNum=$(kubectl get deployment -n kube-system | grep ovn-central | awk {'print $4'})
+    sleep 0.001
+  done
+
+  end_time=$(date +%s.%N)
+  elapsed_time=$(echo "$end_time - $start_time" | bc)
+  addHeaderDecoration "OVN $component_name Recovery takes $elapsed_time s"
+}
+
+
+
 if [ $# -lt 1 ]; then
   showHelp
   exit 0
@@ -980,6 +1557,9 @@ case $subcommand in
     ;;
   env-check)
     env-check
+    ;;
+  perf)
+    perf "$@"
     ;;
   *)
     showHelp
