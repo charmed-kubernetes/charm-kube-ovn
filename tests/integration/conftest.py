@@ -1,7 +1,5 @@
 import time
 import os
-import juju.utils
-from juju.tag import untag
 import asyncio
 import json
 import pytest
@@ -12,20 +10,24 @@ from pathlib import Path
 import yaml
 import shlex
 from lightkube import Client, codecs, KubeConfig
-from lightkube.resources.apps_v1 import DaemonSet
-from lightkube.resources.core_v1 import Pod
-from lightkube.resources.core_v1 import Namespace
-from lightkube.resources.core_v1 import Node
-from lightkube.resources.apps_v1 import Deployment
-from lightkube.resources.core_v1 import Service
+from lightkube.core.exceptions import ApiError, ObjectDeleted
+from lightkube.resources.apps_v1 import DaemonSet, Deployment
+from lightkube.resources.core_v1 import Namespace, Node, Pod, Service
 from lightkube.generic_resource import create_global_resource
 from lightkube.types import PatchType
 from random import choices
 from string import ascii_lowercase, digits
 from typing import Union, Tuple
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_delay,
+    wait_fixed,
+)
 
 
 log = logging.getLogger(__name__)
+GRAFANA = "grafana-k8s"
 
 
 def pytest_addoption(parser):
@@ -285,13 +287,10 @@ async def k8s_cloud(kubeconfig, module_name, ops_test, request):
     for deploying a new k8s model into"""
     cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
     controller = await ops_test.model.get_controller()
-    try:
-        current_clouds = await controller.clouds()
-        if f"cloud-{cloud_name}" in current_clouds.clouds:
-            yield cloud_name
-            return
-    finally:
-        await controller.disconnect()
+    current_clouds = await controller.clouds()
+    if f"cloud-{cloud_name}" in current_clouds.clouds:
+        yield cloud_name
+        return
 
     with ops_test.model_context("main"):
         log.info(f"Adding cloud '{cloud_name}'...")
@@ -306,101 +305,109 @@ async def k8s_cloud(kubeconfig, module_name, ops_test, request):
         )
     yield cloud_name
 
-    with ops_test.model_context("main"):
-        log.info(f"Removing cloud '{cloud_name}'...")
-        await ops_test.juju(
-            "remove-cloud",
-            cloud_name,
-            "--controller",
-            ops_test.controller_name,
-            "--client",
-            check=True,
+
+@retry(
+    retry=retry_if_exception_type(AssertionError),
+    stop=stop_after_delay(60 * 10),
+    wait=wait_fixed(1),
+)
+async def confirm_multus_installed(ops_test):
+    model = ops_test.model
+    model_name = ops_test.model_full_name
+    for unit in model.applications["kubernetes-worker"].units:
+        log.info(f"Confirming multus config on unit {unit.name}")
+        multus_match = "sudo ls /etc/cni/net.d | grep multus"
+        ssh_cmd = f"ssh -m {model_name} {unit.name} -- {multus_match}"
+        rc, *_ = await ops_test.juju(*shlex.split(ssh_cmd))
+        assert rc == 0, f"Multus not yet on {unit.name}"
+    log.info("Multus Installed")
+
+
+async def confirm_multus_removed(ops_test):
+    model = ops_test.model
+    model_name = ops_test.model_full_name
+    for unit in model.applications["kubernetes-worker"].units:
+        commands = (
+            "sudo rm -rf /etc/cni/net.d/multus.d",
+            "sudo rm -rf /etc/cni/net.d/00-multus.conf",
         )
+        for command in commands:
+            ssh_cmd = f"ssh -m {model_name} {unit.name} -- {command}"
+            await ops_test.juju(*shlex.split(ssh_cmd))
+    log.info("Multus Removed")
 
 
 @pytest.fixture(scope="module")
-async def k8s_model(k8s_cloud, ops_test):
+async def k8s_model(k8s_cloud, ops_test, client: Client):
     model_alias = "k8s-model"
-    log.info("Creating k8s model ...")
-    # Create model with Juju CLI to work around a python-libjuju bug
-    # https://github.com/juju/python-libjuju/issues/603
     model_name = "test-kube-ovn-" + "".join(choices(ascii_lowercase + digits, k=4))
-    await ops_test.juju(
-        "add-model",
-        f"--controller={ops_test.controller_name}",
-        model_name,
-        k8s_cloud,
-        "--no-switch",
-    )
-    model = await ops_test.track_model(
+    log.info(f"Creating k8s model {model_name}...")
+    machine_model = ops_test.model
+    await confirm_multus_removed(ops_test)
+    await ops_test.track_model(
         model_alias,
         model_name=model_name,
         cloud_name=k8s_cloud,
         credential_name=k8s_cloud,
         keep=False,
     )
-    model_uuid = model.info.uuid
-    yield model, model_alias
-    timeout = 5 * 60
-    await ops_test.forget_model(model_alias, timeout=timeout, allow_failure=False)
 
-    async def model_removed():
-        _, stdout, stderr = await ops_test.juju("models", "--format", "yaml")
-        if _ != 0:
-            return False
-        model_list = yaml.safe_load(stdout)["models"]
-        which = [m for m in model_list if m["model-uuid"] == model_uuid]
-        return len(which) == 0
-
-    log.info("Removing k8s model")
-    await juju.utils.block_until_with_coroutine(model_removed, timeout=timeout)
-    # Update client's model cache
-    await ops_test.juju("models")
-    log.info("k8s model removed")
-
-
-@pytest.fixture(scope="module")
-async def multus_installed(ops_test, k8s_model):
-    _, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias) as model:
-        await model.deploy(entity_url="multus", trust=True, channel="edge")
-        await model.block_until(lambda: "multus" in model.applications, timeout=60)
-        await model.wait_for_idle(status="active", timeout=60 * 60)
-
-    # need to wait until all kubernetes-worker units have multus CNI config installed
-    deadline = time.time() + 600
-    for unit in ops_test.model.applications["kubernetes-worker"].units:
-        log.info("waiting for Multus config on unit %s" % unit.name)
-        while time.time() < deadline:
-            rc, _, _ = await ops_test.juju(
-                "ssh",
-                "-m",
-                ops_test.model_full_name,
-                unit.name,
-                "--",
-                "sudo",
-                "ls",
-                "/etc/cni/net.d",
-                "|",
-                "grep",
-                "multus",
+    saases = []
+    try:
+        with ops_test.model_context(model_alias) as k8s_model:
+            await asyncio.gather(
+                *(
+                    k8s_model.deploy(app, trust=True, channel="edge")
+                    for app in ("multus", GRAFANA, "prometheus-k8s")
+                )
             )
-            if rc == 0:
-                break
-            await asyncio.sleep(1)
-        else:
-            pytest.fail("timed out waiting for Multus config on unit %s" % unit.name)
+            saas_model = f"{k8s_model.info.users[0].display_name}/{model_name}"
+            await k8s_model.create_offer(f"{GRAFANA}:grafana-dashboard")
+            await k8s_model.create_offer("prometheus-k8s:receive-remote-write")
+            saases.append(await machine_model.consume(f"{saas_model}.{GRAFANA}"))
+            saases.append(await machine_model.consume(f"{saas_model}.prometheus-k8s"))
 
-    yield
+            async with ops_test.fast_forward():
+                # The o11y charms like to error occasionally -- just wait for stable
+                await k8s_model.wait_for_idle(
+                    status="active", timeout=60 * 10, raise_on_error=False
+                )
 
-    with ops_test.model_context(k8s_alias) as m:
-        log.info("Removing multus application ...")
-        cmd = "remove-application multus --destroy-storage --force"
-        rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-        log.info(stdout)
-        log.info(stderr)
-        assert rc == 0
-        await m.block_until(lambda: "multus" not in m.applications, timeout=60 * 10)
+            # the o11y charms seems to not evaluate their relations until after the units are active/idle
+            await machine_model.relate("kube-ovn:grafana-dashboard", GRAFANA)
+            await machine_model.relate("kube-ovn:send-remote-write", "prometheus-k8s")
+            async with ops_test.fast_forward():
+                await k8s_model.wait_for_idle(
+                    status="active", timeout=60 * 5, raise_on_error=False
+                )
+
+        await confirm_multus_installed(ops_test)
+        async with ops_test.fast_forward():
+            await machine_model.wait_for_idle(status="active", timeout=60 * 10)
+
+        log.info("K8s model Ready")
+
+        yield model_alias
+    finally:
+        log.info("Removing k8s model")
+        for saas in saases:
+            log.info(f"Removing {saas} CMR consumer and offers")
+            await machine_model.remove_saas(saas)
+            await k8s_model.remove_offer(f"{model_name}.{saas}", force=True)
+
+        await ops_test.forget_model(model_alias, timeout=5 * 60, allow_failure=False)
+        await confirm_multus_removed(ops_test)
+
+    log.info("Confirming k8s model is delete...")
+    try:
+        client.get(Namespace, model_name)
+        client.wait(Namespace, model_name, for_conditions=[])
+    except (ObjectDeleted, ApiError):
+        log.info("Confirmed...")
+
+    async with ops_test.fast_forward():
+        log.info("Confirming machine model is stable...")
+        await machine_model.wait_for_idle(status="active", timeout=60 * 10)
 
 
 def wait_daemonset(client: Client, namespace, name, pods_ready):
@@ -415,78 +422,10 @@ def wait_daemonset(client: Client, namespace, name, pods_ready):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_app(ops_test, k8s_model):
-    grafana_model_obj, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias) as m:
-        log.info("Deploying grafana-k8s ...")
-        await m.deploy(entity_url="grafana-k8s", trust=True, channel="edge")
-
-        await m.block_until(lambda: "grafana-k8s" in m.applications, timeout=60 * 10)
-        await m.wait_for_idle(status="active", timeout=60 * 10)
-
-    yield "grafana-k8s"
-
-    with ops_test.model_context(k8s_alias) as m:
-        keep = ops_test.keep_model
-        if not keep:
-            log.info("Removing grafana-k8s application ...")
-            cmd = "remove-application grafana-k8s --destroy-storage --force"
-            rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-            log.info(stdout)
-            log.info(stderr)
-            assert rc == 0
-            await m.block_until(
-                lambda: "grafana-k8s" not in m.applications, timeout=60 * 10
-            )
-
-
-@pytest_asyncio.fixture(scope="module")
-async def related_grafana(ops_test, grafana_app, k8s_model):
-    grafana_model_obj, k8s_alias = k8s_model
-    app_name = grafana_app
-    machine_model_name = ops_test.model_name
-    model_owner = untag("user-", grafana_model_obj.info.owner_tag)
-    with ops_test.model_context(k8s_alias) as m:
-        offer, saas = None, None
-        log.info("Creating CMR offer for Grafana")
-        offer = await m.create_offer(f"{app_name}:grafana-dashboard")
-        grafana_model_name = ops_test.model_name
-
-    log.info("Consuming Grafana CMR offer")
-    log.info(
-        f"{machine_model_name} consuming Grafana CMR offer from {grafana_model_name}"
-    )
-    saas = await ops_test.model.consume(
-        f"{model_owner}/{grafana_model_name}.{app_name}"
-    )
-    log.info("Relating grafana and kube-ovn...")
-    await ops_test.model.add_relation("kube-ovn", f"{app_name}:grafana-dashboard")
-    with ops_test.model_context(k8s_alias) as gf_model:
-        await gf_model.wait_for_idle(status="active")
-    await ops_test.model.wait_for_idle(status="active")
-    yield
-    with ops_test.model_context(k8s_alias) as m:
-        keep = ops_test.keep_model
-    if not keep:
-        try:
-            if saas:
-                log.info("Removing Grafana CMR consumer")
-                await ops_test.model.remove_saas(app_name)
-            if offer:
-                log.info("Removing Grafana CMR offer and relations")
-                await grafana_model_obj.remove_offer(
-                    f"{grafana_model_name}.{app_name}", force=True
-                )
-        except Exception:
-            log.exception("Error performing cleanup")
-
-
-@pytest_asyncio.fixture(scope="module")
-async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
-    grafana_model_obj, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias):
+async def grafana_password(ops_test, k8s_model):
+    with ops_test.model_context(k8s_model):
         action = (
-            await ops_test.model.applications[grafana_app]
+            await ops_test.model.applications[GRAFANA]
             .units[0]
             .run_action("get-admin-password")
         )
@@ -495,9 +434,8 @@ async def grafana_password(ops_test, related_grafana, k8s_model, grafana_app):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_service(ops_test, client, related_grafana, k8s_model, grafana_app):
-    _, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias):
+async def grafana_host(ops_test, client, k8s_model, worker_node):
+    with ops_test.model_context(k8s_model):
         grafana_model_name = ops_test.model_name
 
     log.info("Creating Grafana service ...")
@@ -506,23 +444,17 @@ async def grafana_service(ops_test, client, related_grafana, k8s_model, grafana_
         for obj in codecs.load_all_yaml(f):
             client.create(obj, namespace=grafana_model_name)
 
-    yield
+    worker_ip = None
+    for address in worker_node.status.addresses:
+        if address.type == "ExternalIP":
+            worker_ip = address.address
+
+    yield worker_ip
 
     log.info("Deleting Grafana service ...")
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
             client.delete(type(obj), obj.metadata.name, namespace=grafana_model_name)
-
-
-@pytest_asyncio.fixture(scope="module")
-async def grafana_host(
-    ops_test, grafana_service, worker_node, related_grafana, k8s_model, grafana_app
-):
-    worker_ip = None
-    for address in worker_node.status.addresses:
-        if address.type == "ExternalIP":
-            worker_ip = address.address
-    return worker_ip
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -539,81 +471,8 @@ async def expected_dashboard_titles():
 
 
 @pytest_asyncio.fixture(scope="module")
-async def prometheus_app(ops_test, k8s_model):
-    _, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias) as m:
-        log.info("Deploying prometheus-k8s ...")
-        await m.deploy(entity_url="prometheus-k8s", trust=True, channel="edge")
-
-        await m.block_until(lambda: "prometheus-k8s" in m.applications, timeout=60 * 5)
-        await m.wait_for_idle(
-            apps=["prometheus-k8s"],
-            status="active",
-            timeout=60 * 10,
-            raise_on_error=False,
-        )
-
-    yield "prometheus-k8s"
-
-    with ops_test.model_context(k8s_alias) as m:
-        keep = ops_test.keep_model
-        if not keep:
-            log.info("Removing prometheus-k8s application ...")
-            cmd = "remove-application prometheus-k8s --destroy-storage --force"
-            rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-            log.info(stdout)
-            log.info(stderr)
-            assert rc == 0
-            await m.block_until(
-                lambda: "prometheus-k8s" not in m.applications, timeout=60 * 10
-            )
-
-
-@pytest_asyncio.fixture(scope="module")
-async def related_prometheus(ops_test, prometheus_app, k8s_model):
-    prometheus_model_obj, k8s_alias = k8s_model
-    app_name = prometheus_app
-    machine_model_name = ops_test.model_name
-    model_owner = untag("user-", prometheus_model_obj.info.owner_tag)
-    with ops_test.model_context(k8s_alias) as m:
-        offer, saas = None, None
-        log.info("Creating CMR offer for Prometheus")
-        offer = await m.create_offer(f"{app_name}:receive-remote-write")
-        prom_model_name = ops_test.model_name
-
-    log.info("Consuming Prometheus CMR offer")
-    log.info(
-        f"{machine_model_name} consuming Prometheus CMR offer from {prom_model_name}"
-    )
-    saas = await ops_test.model.consume(f"{model_owner}/{prom_model_name}.{app_name}")
-    log.info("Relating Prometheus and kube-ovn...")
-    await ops_test.model.add_relation("kube-ovn", f"{app_name}:receive-remote-write")
-    with ops_test.model_context(k8s_alias) as prom_model:
-        await prom_model.wait_for_idle(status="active")
-    await ops_test.model.wait_for_idle(status="active")
-    yield
-    with ops_test.model_context(k8s_alias) as m:
-        keep = ops_test.keep_model
-    if not keep:
-        try:
-            if saas:
-                log.info("Removing Prometheus CMR consumer")
-                await ops_test.model.remove_saas(app_name)
-            if offer:
-                log.info("Removing Prometheus CMR offer and relations")
-                await prometheus_model_obj.remove_offer(
-                    f"{prom_model_name}.{app_name}", force=True
-                )
-        except Exception:
-            log.exception("Error performing cleanup")
-
-
-@pytest_asyncio.fixture(scope="module")
-async def prometheus_service(
-    ops_test, client, related_prometheus, k8s_model, prometheus_app
-):
-    _, k8s_alias = k8s_model
-    with ops_test.model_context(k8s_alias):
+async def prometheus_host(ops_test, client, k8s_model, worker_node):
+    with ops_test.model_context(k8s_model):
         prometheus_model_name = ops_test.model_name
 
     log.info("Creating Prometheus service ...")
@@ -622,28 +481,16 @@ async def prometheus_service(
         for obj in codecs.load_all_yaml(f):
             client.create(obj, namespace=prometheus_model_name)
 
-    yield
-
-    log.info("Deleting Prometheus service ...")
-    with open(path) as f:
-        for obj in codecs.load_all_yaml(f):
-            client.delete(type(obj), obj.metadata.name, namespace=prometheus_model_name)
-
-
-@pytest_asyncio.fixture(scope="module")
-async def prometheus_host(
-    ops_test,
-    prometheus_service,
-    worker_node,
-    related_prometheus,
-    k8s_model,
-    prometheus_app,
-):
     worker_ip = None
     for address in worker_node.status.addresses:
         if address.type == "ExternalIP":
             worker_ip = address.address
-    return worker_ip
+
+    yield worker_ip
+    log.info("Deleting Prometheus service ...")
+    with open(path) as f:
+        for obj in codecs.load_all_yaml(f):
+            client.delete(type(obj), obj.metadata.name, namespace=prometheus_model_name)
 
 
 @pytest_asyncio.fixture(scope="module")
