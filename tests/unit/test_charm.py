@@ -282,11 +282,11 @@ def test_get_registry(harness, charm):
     assert charm.get_registry() == "some.registry.com:443/cdk"
 
 
-def test_load_manifest(charm):
+def test_load_manifests(charm):
     with pytest.raises(FileNotFoundError):
-        charm.load_manifest("bogus.yaml")
-    assert charm.load_manifest("kube-ovn/kube-ovn.yaml")
-    assert charm.load_manifest("kube-ovn/ovn.yaml")
+        charm.load_manifests("bogus.yaml")
+    assert charm.load_manifests("kube-ovn/kube-ovn.yaml")
+    assert charm.load_manifests("kube-ovn/ovn.yaml")
 
 
 def test_render_manifest(charm):
@@ -1033,7 +1033,7 @@ def test_patch_prometheus_resources(mock_render, charm, kubectl, remove):
     kubectl.assert_has_calls(kubectl_calls)
 
 
-@mock.patch("charm.KubeOvnCharm.load_manifest")
+@mock.patch("charm.KubeOvnCharm.load_manifests")
 @mock.patch("charm.KubeOvnCharm.get_resource")
 @mock.patch("charm.KubeOvnCharm.get_container_resource")
 @mock.patch("charm.KubeOvnCharm.replace_images")
@@ -1051,7 +1051,7 @@ def test_apply_speaker(
     replace_images,
     get_container_resource,
     get_resource,
-    load_manifest,
+    load_manifests,
     charm,
 ):
     # Setup
@@ -1080,8 +1080,8 @@ def test_apply_speaker(
     # Assert Correct Behavior
     assert charm.unit.status == MaintenanceStatus("Applying Speaker resource")
 
-    load_manifest.assert_called_once_with("kube-ovn/speaker.yaml")
-    resources = load_manifest.return_value
+    load_manifests.assert_called_once_with("kube-ovn/speaker.yaml")
+    resources = load_manifests.return_value
     replace_images.assert_called_once_with(resources, DEFAULT_IMAGE_REGISTRY)
     get_resource.assert_called_once_with(
         resources, kind="DaemonSet", name="kube-ovn-speaker"

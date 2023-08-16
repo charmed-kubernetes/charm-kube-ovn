@@ -135,7 +135,12 @@ class KubeOvnCharm(CharmBase):
 
     def apply_kube_ovn(self, service_cidr, registry):
         self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
-        resources = self.load_manifest("kube-ovn/kube-ovn.yaml")
+        resources = self.load_manifests(
+            "kube-ovn/kube-ovn.yaml",
+            "kube-ovn/kube-ovn-app-sa.yaml",
+            "kube-ovn/kube-ovn-cni-sa.yaml",
+            "kube-ovn/kube-ovn-sa.yaml",
+        )
         control_plane_node_label = self.model.config["control-plane-node-label"]
         cidr = self.model.config["default-cidr"]
         gateway = self.model.config["default-gateway"]
@@ -234,7 +239,9 @@ class KubeOvnCharm(CharmBase):
 
     def apply_ovn(self, registry):
         self.unit.status = MaintenanceStatus("Applying OVN resources")
-        resources = self.load_manifest("kube-ovn/ovn.yaml")
+        resources = self.load_manifests(
+            "kube-ovn/ovn.yaml", "kube-ovn/ovn-ovs-sa.yaml", "kube-ovn/ovs-ovn-ds.yaml"
+        )
         node_ips = self.get_ovn_node_ips()
         self.replace_images(resources, registry)
 
@@ -267,7 +274,7 @@ class KubeOvnCharm(CharmBase):
 
     def apply_speaker(self, registry, speaker_config: SpeakerConfig):
         self.unit.status = MaintenanceStatus("Applying Speaker resource")
-        resources = self.load_manifest("kube-ovn/speaker.yaml")
+        resources = self.load_manifests("kube-ovn/speaker.yaml")
         speaker = self.get_resource(
             resources, kind="DaemonSet", name="kube-ovn-speaker"
         )
@@ -482,9 +489,12 @@ class KubeOvnCharm(CharmBase):
         cmd = ["kubectl", "--kubeconfig", "/root/.kube/config"] + list(args)
         return check_output(cmd)
 
-    def load_manifest(self, name):
-        with open("templates/" + name) as f:
-            return list(yaml.safe_load_all(f))
+    def load_manifests(self, *names):
+        resources = []
+        for name in names:
+            with open("templates/" + name) as f:
+                resources += list(yaml.safe_load_all(f))
+        return resources
 
     def on_cni_relation_joined(self, event):
         self.configure_cni_relation()
