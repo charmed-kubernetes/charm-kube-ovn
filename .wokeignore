@@ -1,4 +1,2 @@
-templates/crd.yaml
-templates/kube-ovn.yaml
-templates/ovn.yaml
+templates/kube-ovn/*.yaml
 plugins/kubectl-ko
