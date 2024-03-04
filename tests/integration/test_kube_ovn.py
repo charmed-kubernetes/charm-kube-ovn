@@ -547,12 +547,12 @@ async def test_bgp(ops_test, kubectl, kubectl_get, scope):
     template = template_path.read_text()
     manifest = ops_test.tmp_path / "test-bgp.yaml"
     manifest_data = template.format(
-        pod_annotations='annotations: {ovn.kubernetes.io/bgp: "true"}'
-        if scope == "pod"
-        else "",
-        subnet_annotations='annotations: {ovn.kubernetes.io/bgp: "true"}'
-        if scope == "subnet"
-        else "",
+        pod_annotations=(
+            'annotations: {ovn.kubernetes.io/bgp: "true"}' if scope == "pod" else ""
+        ),
+        subnet_annotations=(
+            'annotations: {ovn.kubernetes.io/bgp: "true"}' if scope == "subnet" else ""
+        ),
     )
     manifest.write_text(manifest_data)
 
