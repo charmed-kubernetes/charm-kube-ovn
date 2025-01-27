@@ -348,7 +348,6 @@ async def k8s_model(k8s_cloud, ops_test, client: Client):
         model_alias,
         model_name=model_name,
         cloud_name=k8s_cloud,
-        credential_name=k8s_cloud,
         keep=False,
     )
 
@@ -607,9 +606,7 @@ async def bird(ops_test):
 
     cmd = "remove-application bird --force"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    log.info(stdout)
-    log.info(stderr)
-    assert rc == 0
+    assert rc == 0, f"Failed to remove bird: {(stdout or stderr).strip()}"
     await ops_test.model.block_until(
         lambda: "bird" not in ops_test.model.applications, timeout=60 * 10
     )
@@ -633,7 +630,7 @@ async def bird_container_ip(ops_test, bird):
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to initialize lxd: {(stdout or stderr).strip()}"
 
-    cmd = f"exec --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
+    cmd = f"exec --unit {bird_unit.name} -- sudo lxc launch ubuntu:22.04 ubuntu-container"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to launch ubuntu container: {(stdout or stderr).strip()}"
 

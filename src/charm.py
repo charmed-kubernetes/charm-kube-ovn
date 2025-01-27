@@ -355,6 +355,11 @@ class KubeOvnCharm(CharmBase):
             self.unit.status = WaitingStatus("Waiting for CNI relation")
             return
 
+        if not self.unit.is_leader():
+            self.stored.kube_ovn_configured = True
+            log.info("Skipping configuration, not the leader")
+            return
+
         try:
             self.check_if_pod_restart_will_be_needed()
 
@@ -518,17 +523,18 @@ class KubeOvnCharm(CharmBase):
         self.install_kubectl_plugin("kubectl-ko")
         self.set_active_status()
 
-    def on_leader_elected(self, _):
+    def on_leader_elected(self, event):
         if self.unit.is_leader():
             try:
                 self.kubectl("get", "namespace", self.stored.grafana_namespace)
-                self.stored.grafana_agent_configured = (
-                    self.stored.prometheus_patched
-                ) = True
+                has_grafana = True
             except CalledProcessError:
-                self.stored.grafana_agent_configured = (
-                    self.stored.prometheus_patched
-                ) = False
+                has_grafana = False
+
+            self.stored.grafana_agent_configured = self.stored.prometheus_patched = (
+                has_grafana
+            )
+            self.on_config_changed(event)
 
     def on_remove(self, _):
         self.remove_kubectl_plugin("kubectl-ko")

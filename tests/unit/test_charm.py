@@ -41,6 +41,9 @@ def harness():
 @pytest.fixture
 def charm(harness):
     harness.begin_with_initial_hooks()
+    harness.disable_hooks()
+    harness.set_leader(True)
+    harness.enable_hooks()
     yield harness.charm
 
 
