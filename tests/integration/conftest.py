@@ -1,3 +1,4 @@
+import ipaddress
 import time
 import asyncio
 import json
@@ -27,6 +28,8 @@ from tenacity import (
 
 log = logging.getLogger(__name__)
 GRAFANA = "grafana-k8s"
+BIRD = "bird"
+NUM_BIRD_UNITS = 3
 
 
 def pytest_addoption(parser):
@@ -503,15 +506,22 @@ def default_subnet(client, subnet_resource):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def bird(ops_test):
-    await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=3)
+async def bird(ops_test: OpsTest):
+    bird_app = ops_test.model.applications.get(BIRD)
+    if not bird_app:
+        bird_app = await ops_test.model.deploy(
+            entity_url=BIRD, channel="stable", num_units=NUM_BIRD_UNITS
+        )
+    elif len(bird_app.units) < NUM_BIRD_UNITS:
+        await bird_app.add_unit(NUM_BIRD_UNITS - len(bird_app.units))
+
     await ops_test.model.block_until(
-        lambda: "bird" in ops_test.model.applications, timeout=60
+        lambda: BIRD in ops_test.model.applications, timeout=60
     )
+
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
     log.info("Bird deployment complete")
 
-    bird_app = ops_test.model.applications["bird"]
     kube_ovn_app = ops_test.model.applications["kube-ovn"]
     worker_app = ops_test.model.applications["kubernetes-worker"]
 
@@ -554,57 +564,63 @@ async def bird(ops_test):
     yield
 
     log.info("Setting empty bgp-speakers config ...")
-    await kube_ovn_app.set_config(
-        {
-            "bgp-speakers": "",
-        }
-    )
+    await kube_ovn_app.set_config({"bgp-speakers": ""})
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
     cmd = "remove-application bird --force --no-prompt"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
     assert rc == 0, f"Failed to remove bird: {(stdout or stderr).strip()}"
     await ops_test.model.block_until(
-        lambda: "bird" not in ops_test.model.applications, timeout=60 * 10
+        lambda: BIRD not in ops_test.model.applications, timeout=60 * 10
     )
 
 
 @pytest_asyncio.fixture(scope="module")
-async def bird_container_ip(ops_test, bird):
-    bird_app = ops_test.model.applications["bird"]
+async def bird_container_ip(ops_test, bird) -> ipaddress.IPv4Address:
+    bird_app = ops_test.model.applications[BIRD]
     bird_unit = bird_app.units[0]
+    unit_name = bird_unit.name
 
-    cmd = f"exec --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to enable IP forwarding: {(stdout or stderr).strip()}"
+    async def exec_on_unit(cmd, description):
+        log.info(f"Running command to {description} ...")
+        rc, stdout, stderr = await ops_test.juju(
+            *shlex.split(f"exec --unit {unit_name} -- {cmd}")
+        )
+        assert rc == 0, f"Failed to {description}: {(stdout or stderr).strip()}"
+        return stdout.strip()
 
-    cmd = f"exec --unit {bird_unit.name} -- sudo apt install -y jq"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to install jq: {(stdout or stderr).strip()}"
-
-    log.info(f"Creating ubuntu container on bird unit {bird_unit.name}")
-    cmd = f"exec --unit {bird_unit.name} -- sudo lxd init --auto"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to initialize lxd: {(stdout or stderr).strip()}"
-
-    cmd = (
-        f"exec --unit {bird_unit.name} -- sudo lxc launch ubuntu:22.04 ubuntu-container"
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(60 * 10),
+        wait=wait_fixed(1),
     )
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to launch ubuntu container: {(stdout or stderr).strip()}"
+    async def container_ipv4_address() -> ipaddress.IPv4Address:
+        stdout = await exec_on_unit(
+            'sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[].address"',
+            "get container IP",
+        )
+        addrs = [ipaddress.ip_address(line) for line in stdout.splitlines()]
+        assert any(
+            addr.version == 4 for addr in addrs
+        ), f"Container has no IPv4 address: {addrs}"
+        container_ip = next(addr for addr in addrs if addr.version == 4)
+        log.info("Ubuntu container IP %s", container_ip)
+        return container_ip
 
-    cmd = f'exec --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to get container IP: {(stdout or stderr).strip()}"
+    for description, cmd in {
+        "enable IP forwarding": "sudo sysctl -w net.ipv4.ip_forward=1",
+        "install jq": "sudo apt install -y jq",
+        "initialize lxd": "sudo lxd init --auto",
+        "launch ubuntu container": "sudo lxc launch ubuntu:22.04 ubuntu-container",
+    }.items():
+        await exec_on_unit(cmd, description)
 
-    container_ip = stdout
-    log.info(f"Ubuntu container IP {container_ip}")
-    return container_ip
+    return await container_ipv4_address()
 
 
 @pytest_asyncio.fixture(scope="module")
 async def external_gateway_pod(ops_test, client, subnet_resource):
-    bird_app = ops_test.model.applications["bird"]
+    bird_app = ops_test.model.applications[BIRD]
     bird_unit = bird_app.units[0]
     log.info(f"Getting IP for bird unit {bird_unit.name}")
     cmd = f"juju show-unit {bird_unit.name}"

@@ -323,7 +323,7 @@ def test_get_ovn_node_ips(harness, charm, kubectl):
     ],
 )
 def test_wait_for(kubectl, charm, name, resource):
-    method_name = f"wait_for_{name.replace('-','_')}"
+    method_name = f"wait_for_{name.replace('-', '_')}"
     wait_method = getattr(charm, method_name)
     wait_method()
     assert charm.unit.status == WaitingStatus(f"Waiting for {name}")
@@ -895,17 +895,23 @@ def test_remote_write_consumer_changed_exception(
 
 
 @pytest.mark.parametrize("leader", [True, False])
+@mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", mock.Mock(return_value=True))
+@mock.patch("charm.KubeOvnCharm.set_active_status")
 @mock.patch("charm.KubeOvnCharm.remove_grafana_agent")
-def test_on_send_remote_write_departed(remove_grafana_agent, harness, leader):
+def test_on_send_remote_write_departed(
+    remove_grafana_agent, set_active_status, harness, leader
+):
+    harness.begin()
+    harness.disable_hooks()
     harness.set_leader(leader)
-    harness.begin_with_initial_hooks()
     harness.charm.stored = ops.framework.StoredState()
     harness.charm.stored.grafana_agent_configured = True
     mock_event = mock.MagicMock()
     harness.charm.on_send_remote_write_departed(mock_event)
 
     if leader:
-        remove_grafana_agent.called_once()
+        remove_grafana_agent.assert_called_once_with()
+        set_active_status.assert_called_once_with()
     else:
         remove_grafana_agent.assert_not_called()
 
@@ -950,14 +956,13 @@ def test_on_send_remote_write_departed_exception(
 @mock.patch("charm.KubeOvnCharm.patch_prometheus_resources")
 def test_remove_grafana_agent(mock_patch, charm, kubectl):
     patched_resources = [
-        {"kind": "deployment", "name": "kube-ovn-monitor"},
-        {"kind": "daemonset", "name": "kube-ovn-pinger"},
-        {"kind": "daemonset", "name": "kube-ovn-cni"},
+        {"kind": "deployment", "name": "kube-ovn-monitor", "port": 10661},
+        {"kind": "daemonset", "name": "kube-ovn-pinger", "port": 8080},
+        {"kind": "deployment", "name": "kube-ovn-controller", "port": 10660},
+        {"kind": "daemonset", "name": "kube-ovn-cni", "port": 10665},
     ]
     charm.remove_grafana_agent()
-    assert mock_patch.called_once_with(
-        mock.call(patched_resources, "kube-system", remove=True)
-    )
+    mock_patch.assert_called_once_with(patched_resources, "kube-system", remove=True)
     kubectl.assert_called_once_with(
         charm, "delete", "namespace", "kube-ovn-grafana-agent"
     )
