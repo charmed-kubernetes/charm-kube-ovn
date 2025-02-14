@@ -7,18 +7,11 @@ import traceback
 import yaml
 from jinja2 import Environment, FileSystemLoader
 
+import ops
+import ops.model
 from pathlib import Path
 from subprocess import CalledProcessError, check_output
-from ops.charm import CharmBase
-from ops.framework import StoredState
-from ops.main import main
-from ops.model import (
-    ActiveStatus,
-    WaitingStatus,
-    BlockedStatus,
-    MaintenanceStatus,
-    ModelError,
-)
+
 from charms.grafana_k8s.v0.grafana_dashboard import GrafanaDashboardProvider
 from charms.prometheus_k8s.v0.prometheus_remote_write import (
     PrometheusRemoteWriteConsumer,
@@ -60,8 +53,8 @@ class SpeakerConfig(BaseModel):
     log_level: int = Field(2, alias="log-level", gt=-1)
 
 
-class KubeOvnCharm(CharmBase):
-    stored = StoredState()
+class KubeOvnCharm(ops.CharmBase):
+    stored = ops.StoredState()
 
     def __init__(self, *args):
         super().__init__(*args)
@@ -103,7 +96,7 @@ class KubeOvnCharm(CharmBase):
             container_args.append(k + "=" + str(v))
 
     def apply_crds(self):
-        self.unit.status = MaintenanceStatus("Applying CRDs")
+        self.unit.status = ops.MaintenanceStatus("Applying CRDs")
         self.kubectl("apply", "-f", "templates/kube-ovn/kube-ovn-crd.yaml")
 
     def apply_grafana_agent(self, remote_endpoints):
@@ -134,7 +127,7 @@ class KubeOvnCharm(CharmBase):
         self.stored.grafana_agent_configured = True
 
     def apply_kube_ovn(self, service_cidr, registry):
-        self.unit.status = MaintenanceStatus("Applying Kube-OVN resources")
+        self.unit.status = ops.MaintenanceStatus("Applying Kube-OVN resources")
         resources = self.load_manifests(
             "kube-ovn/kube-ovn.yaml",
             "kube-ovn/kube-ovn-app-sa.yaml",
@@ -193,7 +186,7 @@ class KubeOvnCharm(CharmBase):
         cni_args_to_replace = {"--service-cluster-ip-range": service_cidr}
         if enable_global_mirror and not mirror_iface:
             log.error("If enable-global-mirror is true, mirror-iface must be set")
-            self.unit.status = BlockedStatus(
+            self.unit.status = ops.BlockedStatus(
                 "If enable-global-mirror is true, mirror-iface must be set"
             )
         else:
@@ -238,7 +231,7 @@ class KubeOvnCharm(CharmBase):
         self.kubectl("apply", "-f", destination)
 
     def apply_ovn(self, registry):
-        self.unit.status = MaintenanceStatus("Applying OVN resources")
+        self.unit.status = ops.MaintenanceStatus("Applying OVN resources")
         resources = self.load_manifests(
             "kube-ovn/ovn.yaml", "kube-ovn/ovn-ovs-sa.yaml", "kube-ovn/ovs-ovn-ds.yaml"
         )
@@ -273,7 +266,7 @@ class KubeOvnCharm(CharmBase):
         self.apply_manifest(resources, "ovn.yaml")
 
     def apply_speaker(self, registry, speaker_config: SpeakerConfig):
-        self.unit.status = MaintenanceStatus("Applying Speaker resource")
+        self.unit.status = ops.MaintenanceStatus("Applying Speaker resource")
         resources = self.load_manifests("kube-ovn/speaker.yaml")
         speaker = self.get_resource(
             resources, kind="DaemonSet", name="kube-ovn-speaker"
@@ -340,7 +333,7 @@ class KubeOvnCharm(CharmBase):
             self.stored.pod_restart_needed = True
 
     def configure_cni_relation(self):
-        self.unit.status = MaintenanceStatus("Configuring CNI relation")
+        self.unit.status = ops.MaintenanceStatus("Configuring CNI relation")
         cidr = self.model.config["default-cidr"]
         for relation in self.model.relations["cni"]:
             relation.data[self.unit]["cidr"] = cidr
@@ -352,7 +345,7 @@ class KubeOvnCharm(CharmBase):
         service_cidr = self.kube_ovn_peer_data("service-cidr")
         registry = self.get_registry()
         if not self.is_kubeconfig_available() or not service_cidr or not registry:
-            self.unit.status = WaitingStatus("Waiting for CNI relation")
+            self.unit.status = ops.WaitingStatus("Waiting for CNI relation")
             return
 
         if not self.unit.is_leader():
@@ -379,7 +372,9 @@ class KubeOvnCharm(CharmBase):
             # Likely the Kubernetes API is unavailable. Log the exception in
             # case it is something else, and let the caller know we failed.
             log.error(traceback.format_exc())
-            self.unit.status = WaitingStatus("Waiting to retry configuring Kube-OVN")
+            self.unit.status = ops.WaitingStatus(
+                "Waiting to retry configuring Kube-OVN"
+            )
             return
 
         self.stored.kube_ovn_configured = True
@@ -398,7 +393,9 @@ class KubeOvnCharm(CharmBase):
                     self.apply_speaker(registry, speaker_config)
             except ValidationError as e:
                 log.error(f"Error validating bgp-speakers config: {e}")
-                self.unit.status = BlockedStatus("Error validating bgp-speakers config")
+                self.unit.status = ops.BlockedStatus(
+                    "Error validating bgp-speakers config"
+                )
 
     def get_registry(self):
         registry = self.model.config["image-registry"]
@@ -409,7 +406,7 @@ class KubeOvnCharm(CharmBase):
     def get_charm_resource_path(self, resource_name):
         try:
             return self.model.resources.fetch(resource_name)
-        except ModelError as e:
+        except ops.ModelError as e:
             log.error(
                 f"Something went wrong when claiming the {resource_name} resource."
             )
@@ -462,7 +459,7 @@ class KubeOvnCharm(CharmBase):
             )
             plugin_path.write_text(plugin)
             os.chmod(plugin_path, 0o755)
-        except (ModelError, NameError) as e:
+        except (ops.ModelError, NameError) as e:
             log.error(f"Failed to install plugin {plugin_name}")
             log.error(e)
         except OSError as e:
@@ -495,10 +492,21 @@ class KubeOvnCharm(CharmBase):
         return check_output(cmd)
 
     def load_manifests(self, *names):
+        def label_it(resource):
+            labels = resource["metadata"].get("labels") or {}
+            labels["juju.io/application"] = self.model.app.name
+            resource["metadata"]["labels"] = labels
+
         resources = []
         for name in names:
             with open("templates/" + name) as f:
                 resources += list(yaml.safe_load_all(f))
+        for resource in resources:
+            # Add the juju-app label to all resources
+            label_it(resource)
+            if template := resource.get("spec", {}).get("template"):
+                # Add the juju-app label to all pod templates
+                label_it(template)
         return resources
 
     def on_cni_relation_joined(self, event):
@@ -540,7 +548,7 @@ class KubeOvnCharm(CharmBase):
         self.remove_kubectl_plugin("kubectl-ko")
 
     def on_send_remote_write_departed(self, event):
-        self.unit.status = MaintenanceStatus("Deploying Grafana Agent")
+        self.unit.status = ops.MaintenanceStatus("Deploying Grafana Agent")
         if not self.is_kubeconfig_available():
             log.info(
                 "Unable to remove Grafana Agent resources Kubernetes API unavailable."
@@ -584,7 +592,7 @@ class KubeOvnCharm(CharmBase):
             )
 
     def remote_write_consumer_changed(self, event):
-        self.unit.status = MaintenanceStatus("Deploying Grafana Agent")
+        self.unit.status = ops.MaintenanceStatus("Deploying Grafana Agent")
         if not self.is_kubeconfig_available():
             log.info(
                 "Unable to apply Grafana Agent manifest Kubernetes API unavailable."
@@ -671,7 +679,7 @@ class KubeOvnCharm(CharmBase):
         resource["metadata"]["name"] = new_name
 
     def restart_pods(self):
-        self.unit.status = MaintenanceStatus("Restarting pods")
+        self.unit.status = ops.MaintenanceStatus("Restarting pods")
         namespaces = [
             resource["metadata"]["name"]
             for resource in json.loads(self.kubectl("get", "ns", "-o", "json"))["items"]
@@ -700,7 +708,7 @@ class KubeOvnCharm(CharmBase):
 
     def set_active_status(self):
         if self.stored.kube_ovn_configured:
-            self.unit.status = ActiveStatus()
+            self.unit.status = self.get_workload_status()
 
     def set_node_selector(self, resource, new_label, replace=None):
         label_key, label_value = new_label.split("=")
@@ -713,16 +721,69 @@ class KubeOvnCharm(CharmBase):
     def set_replicas(self, resource, replicas):
         resource["spec"]["replicas"] = replicas
 
+    def get_workload_status(self) -> ops.StatusBase:
+        """Get the workload status of the kube-ovn pods."""
+        labels = "juju.io/application={}".format(self.model.app.name)
+        default = ops.WaitingStatus("Waiting for kube-ovn pods")
+        try:
+            result = json.loads(
+                self.kubectl("get", "pod", "-l", labels, "-A", "-o", "json")
+            )
+        except CalledProcessError:
+            log.warning("Failed to get pods")
+            return default
+        except json.JSONDecodeError:
+            log.warning("Failed to decode JSON")
+            return default
+        if not result:
+            return default
+
+        log.info(
+            "Checking system pods status: {}".format(
+                ", ".join(
+                    "=".join([pod["metadata"]["name"], pod["status"]["phase"]])
+                    for pod in result["items"]
+                )
+            )
+        )
+
+        # Pods in phases such as ['Running', 'Succeeded', 'Failed']
+        # should not be considered as pending Pods.
+        valid_phases = ["Running", "Succeeded", "Failed"]
+
+        # Pods that are Running or Evicted (which should re-spawn) are
+        # considered running
+        def is_ready(pod):
+            container_statuses = pod["status"].get("initContainerStatuses", [])
+            container_statuses += pod["status"].get("containerStatuses", [])
+            return all(status.get("ready", True) for status in container_statuses)
+
+        def is_invalid(pod):
+            status = pod["status"]
+            return (
+                status["phase"] not in valid_phases
+                and status.get("reason", "") != "Evicted"
+            )
+
+        if unready := [
+            pod for pod in result["items"] if is_invalid(pod) or not is_ready(pod)
+        ]:
+            plural = "s" if len(unready) > 1 else ""
+            msg = "Waiting for {} kube-ovn pod{} to start"
+            msg = msg.format(len(unready), plural)
+            return ops.WaitingStatus(msg)
+        return ops.ActiveStatus()
+
     def wait_for_kube_ovn_cni(self):
-        self.unit.status = WaitingStatus("Waiting for kube-ovn-cni")
+        self.unit.status = ops.WaitingStatus("Waiting for kube-ovn-cni")
         self.wait_for_rollout("daemonset/kube-ovn-cni")
 
     def wait_for_kube_ovn_controller(self):
-        self.unit.status = WaitingStatus("Waiting for kube-ovn-controller")
+        self.unit.status = ops.WaitingStatus("Waiting for kube-ovn-controller")
         self.wait_for_rollout("deployment/kube-ovn-controller")
 
     def wait_for_ovn_central(self):
-        self.unit.status = WaitingStatus("Waiting for ovn-central")
+        self.unit.status = ops.WaitingStatus("Waiting for ovn-central")
         self.wait_for_rollout("deployment/ovn-central")
 
     def wait_for_rollout(self, name, namespace="kube-system", timeout=1):
@@ -745,4 +806,4 @@ class KubeOvnCharm(CharmBase):
 
 
 if __name__ == "__main__":
-    main(KubeOvnCharm)  # pragma: no cover
+    ops.main(KubeOvnCharm)  # pragma: no cover

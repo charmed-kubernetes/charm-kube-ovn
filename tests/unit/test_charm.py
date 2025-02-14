@@ -12,7 +12,6 @@ from contextlib import ExitStack as does_not_raise
 import json
 import pytest
 from ops.model import (
-    ActiveStatus,
     MaintenanceStatus,
     WaitingStatus,
     BlockedStatus,
@@ -65,6 +64,7 @@ def test_kubectl(mock_check_output, charm):
 
 @mock.patch("charm.KubeOvnCharm.configure_cni_relation")
 @mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
+@mock.patch("charm.KubeOvnCharm.kubectl", mock.Mock(return_value="{}"))
 def test_config_change(configure_kube_ovn, configure_cni_relation, charm, harness):
     configure_kube_ovn.return_value = True
     charm.stored.kube_ovn_configured = True
@@ -72,7 +72,7 @@ def test_config_change(configure_kube_ovn, configure_cni_relation, charm, harnes
     harness.update_config(config_dict)
     configure_cni_relation.assert_called_once()
     configure_kube_ovn.assert_called_once()
-    assert charm.unit.status == ActiveStatus()
+    assert charm.unit.status == WaitingStatus("Waiting for kube-ovn pods")
 
 
 def test_apply_crds(charm, kubectl):
@@ -382,14 +382,15 @@ def test_join_cni_relation(set_active_status, configure_cni_relation, harness, c
     configure_cni_relation.assert_called_once_with()
 
 
-@pytest.mark.parametrize("kubconfig_ready", (True, False))
+@pytest.mark.parametrize("kubeconfig_ready", (True, False))
 @mock.patch("charm.KubeOvnCharm.configure_cni_relation", mock.MagicMock())
+@mock.patch("charm.KubeOvnCharm.kubectl", mock.Mock(return_value="{}"))
 @mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
-def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm):
+def test_change_cni_relation(configure_kube_ovn, kubeconfig_ready, harness, charm):
     rel_id = harness.add_relation("cni", "kubernetes-control-plane")
     harness.add_relation_unit(rel_id, "kubernetes-control-plane/0")
-    configure_kube_ovn.return_value = kubconfig_ready
-    charm.stored.kube_ovn_configured = kubconfig_ready
+    configure_kube_ovn.return_value = kubeconfig_ready
+    charm.stored.kube_ovn_configured = kubeconfig_ready
     harness.update_relation_data(
         rel_id,
         "kubernetes-control-plane/0",
@@ -398,25 +399,26 @@ def test_change_cni_relation(configure_kube_ovn, kubconfig_ready, harness, charm
 
     configure_kube_ovn.assert_called_once_with()
 
-    if kubconfig_ready:
-        assert charm.unit.status == ActiveStatus()
+    if kubeconfig_ready:
+        assert charm.unit.status == WaitingStatus("Waiting for kube-ovn pods")
     else:
         assert charm.unit.status == WaitingStatus("Waiting for CNI relation")
 
 
-@pytest.mark.parametrize("kubconfig_ready", (True, False))
+@pytest.mark.parametrize("kubeconfig_ready", (True, False))
+@mock.patch("charm.KubeOvnCharm.kubectl", mock.Mock(return_value="{}"))
 @mock.patch("charm.KubeOvnCharm.configure_kube_ovn")
-def test_change_kube_ovn_relation(configure_kube_ovn, kubconfig_ready, harness, charm):
+def test_change_kube_ovn_relation(configure_kube_ovn, kubeconfig_ready, harness, charm):
     rel_id = harness.add_relation("kube-ovn", "kube-ovn/1")
     harness.add_relation_unit(rel_id, "kube-ovn/1")
-    configure_kube_ovn.return_value = kubconfig_ready
-    charm.stored.kube_ovn_configured = kubconfig_ready
+    configure_kube_ovn.return_value = kubeconfig_ready
+    charm.stored.kube_ovn_configured = kubeconfig_ready
     harness.update_relation_data(rel_id, "kube-ovn/1", {"key": "val"})
 
     configure_kube_ovn.assert_called_once_with()
 
-    if kubconfig_ready:
-        assert charm.unit.status == ActiveStatus()
+    if kubeconfig_ready:
+        assert charm.unit.status == WaitingStatus("Waiting for kube-ovn pods")
     else:
         assert charm.unit.status == WaitingStatus("Waiting for CNI relation")
 
