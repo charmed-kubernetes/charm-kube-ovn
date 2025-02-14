@@ -1,5 +1,5 @@
+import ipaddress
 import time
-import os
 import asyncio
 import json
 import pytest
@@ -9,14 +9,14 @@ import logging
 from pathlib import Path
 import yaml
 import shlex
+from kubernetes import config as k8s_config
+from kubernetes.client import Configuration
 from lightkube import Client, codecs, KubeConfig
-from lightkube.core.exceptions import ApiError, ObjectDeleted
 from lightkube.resources.apps_v1 import DaemonSet, Deployment
 from lightkube.resources.core_v1 import Namespace, Node, Pod, Service
 from lightkube.generic_resource import create_global_resource
 from lightkube.types import PatchType
-from random import choices
-from string import ascii_lowercase, digits
+from pytest_operator.plugin import OpsTest
 from typing import Union, Tuple
 from tenacity import (
     retry,
@@ -28,6 +28,8 @@ from tenacity import (
 
 log = logging.getLogger(__name__)
 GRAFANA = "grafana-k8s"
+BIRD = "bird"
+NUM_BIRD_UNITS = 3
 
 
 def pytest_addoption(parser):
@@ -41,17 +43,15 @@ def pytest_addoption(parser):
 @pytest.fixture(scope="module")
 async def kubeconfig(ops_test):
     kubeconfig_path = ops_test.tmp_path / "kubeconfig"
-    rc, stdout, stderr = await ops_test.run(
-        "juju", "ssh", "kubernetes-control-plane/leader", "--", "cat", "config"
-    )
-    if rc != 0:
-        log.error(f"retcode: {rc}")
-        log.error(f"stdout:\n{stdout.strip()}")
-        log.error(f"stderr:\n{stderr.strip()}")
-        pytest.fail("Failed to copy kubeconfig from kubernetes-control-plane")
-    assert stdout, "kubeconfig file is 0 bytes"
-    kubeconfig_path.write_text(stdout)
-    yield kubeconfig_path
+    k8s = ops_test.model.applications["kubernetes-control-plane"]
+    action = await k8s.units[0].run_action("get-kubeconfig")
+    result = await action.wait()
+    completed = result.status == "completed" or result.results["return-code"] == 0
+    assert completed, f"Failed to get kubeconfig {result=}"
+    kubeconfig_path.parent.mkdir(exist_ok=True, parents=True)
+    kubeconfig_path.write_text(result.results["kubeconfig"])
+    assert Path(kubeconfig_path).stat().st_size, "kubeconfig file is 0 bytes"
+    return kubeconfig_path
 
 
 @pytest.fixture(scope="module")
@@ -281,31 +281,6 @@ def module_name(request):
     return request.module.__name__.replace("_", "-")
 
 
-@pytest.fixture(scope="module")
-async def k8s_cloud(kubeconfig, module_name, ops_test, request):
-    """Use an existing k8s-cloud or create a k8s-cloud
-    for deploying a new k8s model into"""
-    cloud_name = request.config.option.k8s_cloud or f"{module_name}-k8s-cloud"
-    controller = await ops_test.model.get_controller()
-    current_clouds = await controller.clouds()
-    if f"cloud-{cloud_name}" in current_clouds.clouds:
-        yield cloud_name
-        return
-
-    with ops_test.model_context("main"):
-        log.info(f"Adding cloud '{cloud_name}'...")
-        os.environ["KUBECONFIG"] = str(kubeconfig)
-        await ops_test.juju(
-            "add-k8s",
-            cloud_name,
-            f"--controller={ops_test.controller_name}",
-            "--client",
-            check=True,
-            fail_msg=f"Failed to add-k8s {cloud_name}",
-        )
-    yield cloud_name
-
-
 @retry(
     retry=retry_if_exception_type(AssertionError),
     stop=stop_after_delay(60 * 10),
@@ -338,48 +313,45 @@ async def confirm_multus_removed(ops_test):
 
 
 @pytest.fixture(scope="module")
-async def k8s_model(k8s_cloud, ops_test, client: Client):
-    model_alias = "k8s-model"
-    model_name = "test-kube-ovn-" + "".join(choices(ascii_lowercase + digits, k=4))
-    log.info(f"Creating k8s model {model_name}...")
+async def k8s_model(ops_test: OpsTest, kubeconfig: Path, client: Client):
     machine_model = ops_test.model
+    model_alias = "cos"
+
+    config = type.__call__(Configuration)
+    k8s_config.load_config(client_configuration=config, config_file=str(kubeconfig))
+    k8s_cloud = await ops_test.add_k8s(kubeconfig=config, skip_storage=False)
     await confirm_multus_removed(ops_test)
-    await ops_test.track_model(
-        model_alias,
-        model_name=model_name,
-        cloud_name=k8s_cloud,
-        credential_name=k8s_cloud,
-        keep=False,
+    k8s_model = await ops_test.track_model(
+        model_alias, cloud_name=k8s_cloud, keep=ops_test.ModelKeep.NEVER
     )
 
     saases = []
     try:
-        with ops_test.model_context(model_alias) as k8s_model:
-            await asyncio.gather(
-                *(
-                    k8s_model.deploy(app, trust=True, channel="edge")
-                    for app in ("multus", GRAFANA, "prometheus-k8s")
-                )
+        await asyncio.gather(
+            *(
+                k8s_model.deploy(app, trust=True, channel="edge")
+                for app in ("multus", GRAFANA, "prometheus-k8s")
             )
-            saas_model = f"{k8s_model.info.users[0].display_name}/{model_name}"
-            await k8s_model.create_offer(f"{GRAFANA}:grafana-dashboard")
-            await k8s_model.create_offer("prometheus-k8s:receive-remote-write")
-            saases.append(await machine_model.consume(f"{saas_model}.{GRAFANA}"))
-            saases.append(await machine_model.consume(f"{saas_model}.prometheus-k8s"))
+        )
+        saas_model = f"{k8s_model.info.users[0].display_name}/{k8s_model.name}"
+        await k8s_model.create_offer(f"{GRAFANA}:grafana-dashboard")
+        await k8s_model.create_offer("prometheus-k8s:receive-remote-write")
+        saases.append(await machine_model.consume(f"{saas_model}.{GRAFANA}"))
+        saases.append(await machine_model.consume(f"{saas_model}.prometheus-k8s"))
 
-            async with ops_test.fast_forward():
-                # The o11y charms like to error occasionally -- just wait for stable
-                await k8s_model.wait_for_idle(
-                    status="active", timeout=60 * 10, raise_on_error=False
-                )
+        async with ops_test.fast_forward():
+            # The o11y charms like to error occasionally -- just wait for stable
+            await k8s_model.wait_for_idle(
+                status="active", timeout=60 * 10, raise_on_error=False
+            )
 
-            # the o11y charms seems to not evaluate their relations until after the units are active/idle
-            await machine_model.relate("kube-ovn:grafana-dashboard", GRAFANA)
-            await machine_model.relate("kube-ovn:send-remote-write", "prometheus-k8s")
-            async with ops_test.fast_forward():
-                await k8s_model.wait_for_idle(
-                    status="active", timeout=60 * 5, raise_on_error=False
-                )
+        # the o11y charms seems to not evaluate their relations until after the units are active/idle
+        await machine_model.relate("kube-ovn:grafana-dashboard", GRAFANA)
+        await machine_model.relate("kube-ovn:send-remote-write", "prometheus-k8s")
+        async with ops_test.fast_forward():
+            await k8s_model.wait_for_idle(
+                status="active", timeout=60 * 5, raise_on_error=False
+            )
 
         await confirm_multus_installed(ops_test)
         async with ops_test.fast_forward():
@@ -387,23 +359,15 @@ async def k8s_model(k8s_cloud, ops_test, client: Client):
 
         log.info("K8s model Ready")
 
-        yield model_alias
+        yield k8s_model
     finally:
         log.info("Removing k8s model")
         for saas in saases:
             log.info(f"Removing {saas} CMR consumer and offers")
             await machine_model.remove_saas(saas)
-            await k8s_model.remove_offer(f"{model_name}.{saas}", force=True)
+            await k8s_model.remove_offer(f"{k8s_model.name}.{saas}", force=True)
 
-        await ops_test.forget_model(model_alias, timeout=5 * 60, allow_failure=False)
         await confirm_multus_removed(ops_test)
-
-    log.info("Confirming k8s model is delete...")
-    try:
-        client.get(Namespace, model_name)
-        client.wait(Namespace, model_name, for_conditions=[])
-    except (ObjectDeleted, ApiError):
-        log.info("Confirmed...")
 
     async with ops_test.fast_forward():
         log.info("Confirming machine model is stable...")
@@ -422,27 +386,23 @@ def wait_daemonset(client: Client, namespace, name, pods_ready):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_password(ops_test, k8s_model):
-    with ops_test.model_context(k8s_model):
-        action = (
-            await ops_test.model.applications[GRAFANA]
-            .units[0]
-            .run_action("get-admin-password")
-        )
-        action = await action.wait()
-    return action.results["admin-password"]
+async def grafana_password(k8s_model):
+    """Fixture to get Grafana password."""
+    action = (
+        await k8s_model.applications[GRAFANA].units[0].run_action("get-admin-password")
+    )
+    action = await action.wait()
+    yield action.results["admin-password"]
 
 
 @pytest_asyncio.fixture(scope="module")
-async def grafana_host(ops_test, client, k8s_model, worker_node):
-    with ops_test.model_context(k8s_model):
-        grafana_model_name = ops_test.model_name
-
-    log.info("Creating Grafana service ...")
+async def grafana_host(client, k8s_model, worker_node):
+    namespace = k8s_model.name
+    log.info("Creating Grafana service in %s...", namespace)
     path = Path("tests/data/grafana_service.yaml")
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
-            client.create(obj, namespace=grafana_model_name)
+            client.create(obj, namespace=namespace)
 
     worker_ip = None
     for address in worker_node.status.addresses:
@@ -454,7 +414,7 @@ async def grafana_host(ops_test, client, k8s_model, worker_node):
     log.info("Deleting Grafana service ...")
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
-            client.delete(type(obj), obj.metadata.name, namespace=grafana_model_name)
+            client.delete(type(obj), obj.metadata.name, namespace=namespace)
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -472,14 +432,13 @@ async def expected_dashboard_titles():
 
 @pytest_asyncio.fixture(scope="module")
 async def prometheus_host(ops_test, client, k8s_model, worker_node):
-    with ops_test.model_context(k8s_model):
-        prometheus_model_name = ops_test.model_name
+    namespace = k8s_model.name
 
-    log.info("Creating Prometheus service ...")
+    log.info("Creating Prometheus service in %s ...", namespace)
     path = Path("tests/data/prometheus_service.yaml")
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
-            client.create(obj, namespace=prometheus_model_name)
+            client.create(obj, namespace=namespace)
 
     worker_ip = None
     for address in worker_node.status.addresses:
@@ -490,7 +449,7 @@ async def prometheus_host(ops_test, client, k8s_model, worker_node):
     log.info("Deleting Prometheus service ...")
     with open(path) as f:
         for obj in codecs.load_all_yaml(f):
-            client.delete(type(obj), obj.metadata.name, namespace=prometheus_model_name)
+            client.delete(type(obj), obj.metadata.name, namespace=namespace)
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -547,15 +506,22 @@ def default_subnet(client, subnet_resource):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def bird(ops_test):
-    await ops_test.model.deploy(entity_url="bird", channel="stable", num_units=3)
+async def bird(ops_test: OpsTest):
+    bird_app = ops_test.model.applications.get(BIRD)
+    if not bird_app:
+        bird_app = await ops_test.model.deploy(
+            entity_url=BIRD, channel="stable", num_units=NUM_BIRD_UNITS
+        )
+    elif len(bird_app.units) < NUM_BIRD_UNITS:
+        await bird_app.add_unit(NUM_BIRD_UNITS - len(bird_app.units))
+
     await ops_test.model.block_until(
-        lambda: "bird" in ops_test.model.applications, timeout=60
+        lambda: BIRD in ops_test.model.applications, timeout=60
     )
+
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
     log.info("Bird deployment complete")
 
-    bird_app = ops_test.model.applications["bird"]
     kube_ovn_app = ops_test.model.applications["kube-ovn"]
     worker_app = ops_test.model.applications["kubernetes-worker"]
 
@@ -598,57 +564,63 @@ async def bird(ops_test):
     yield
 
     log.info("Setting empty bgp-speakers config ...")
-    await kube_ovn_app.set_config(
-        {
-            "bgp-speakers": "",
-        }
-    )
+    await kube_ovn_app.set_config({"bgp-speakers": ""})
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
-    cmd = "remove-application bird --force"
+    cmd = "remove-application bird --force --no-prompt"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    log.info(stdout)
-    log.info(stderr)
-    assert rc == 0
+    assert rc == 0, f"Failed to remove bird: {(stdout or stderr).strip()}"
     await ops_test.model.block_until(
-        lambda: "bird" not in ops_test.model.applications, timeout=60 * 10
+        lambda: BIRD not in ops_test.model.applications, timeout=60 * 10
     )
 
 
 @pytest_asyncio.fixture(scope="module")
-async def bird_container_ip(ops_test, bird):
-    bird_app = ops_test.model.applications["bird"]
+async def bird_container_ip(ops_test, bird) -> ipaddress.IPv4Address:
+    bird_app = ops_test.model.applications[BIRD]
     bird_unit = bird_app.units[0]
+    unit_name = bird_unit.name
 
-    cmd = f"exec --unit {bird_unit.name} -- sudo sysctl -w net.ipv4.ip_forward=1"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to enable IP forwarding: {(stdout or stderr).strip()}"
+    async def exec_on_unit(cmd, description):
+        log.info(f"Running command to {description} ...")
+        rc, stdout, stderr = await ops_test.juju(
+            *shlex.split(f"exec --unit {unit_name} -- {cmd}")
+        )
+        assert rc == 0, f"Failed to {description}: {(stdout or stderr).strip()}"
+        return stdout.strip()
 
-    cmd = f"exec --unit {bird_unit.name} -- sudo apt install -y jq"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to install jq: {(stdout or stderr).strip()}"
+    @retry(
+        retry=retry_if_exception_type(AssertionError),
+        stop=stop_after_delay(60 * 10),
+        wait=wait_fixed(1),
+    )
+    async def container_ipv4_address() -> ipaddress.IPv4Address:
+        stdout = await exec_on_unit(
+            'sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[].address"',
+            "get container IP",
+        )
+        addrs = [ipaddress.ip_address(line) for line in stdout.splitlines()]
+        assert any(
+            addr.version == 4 for addr in addrs
+        ), f"Container has no IPv4 address: {addrs}"
+        container_ip = next(addr for addr in addrs if addr.version == 4)
+        log.info("Ubuntu container IP %s", container_ip)
+        return container_ip
 
-    log.info(f"Creating ubuntu container on bird unit {bird_unit.name}")
-    cmd = f"exec --unit {bird_unit.name} -- sudo lxd init --auto"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to initialize lxd: {(stdout or stderr).strip()}"
+    for description, cmd in {
+        "enable IP forwarding": "sudo sysctl -w net.ipv4.ip_forward=1",
+        "install jq": "sudo apt install -y jq",
+        "initialize lxd": "sudo lxd init --auto",
+        "launch ubuntu container": "sudo lxc launch ubuntu:22.04 ubuntu-container",
+    }.items():
+        await exec_on_unit(cmd, description)
 
-    cmd = f"exec --unit {bird_unit.name} -- sudo lxc launch images:ubuntu/22.04 ubuntu-container"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to launch ubuntu container: {(stdout or stderr).strip()}"
-
-    cmd = f'exec --unit {bird_unit.name} -- sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[0].address"'
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to get container IP: {(stdout or stderr).strip()}"
-
-    container_ip = stdout
-    log.info(f"Ubuntu container IP {container_ip}")
-    return container_ip
+    return await container_ipv4_address()
 
 
 @pytest_asyncio.fixture(scope="module")
 async def external_gateway_pod(ops_test, client, subnet_resource):
-    bird_app = ops_test.model.applications["bird"]
+    bird_app = ops_test.model.applications[BIRD]
     bird_unit = bird_app.units[0]
     log.info(f"Getting IP for bird unit {bird_unit.name}")
     cmd = f"juju show-unit {bird_unit.name}"

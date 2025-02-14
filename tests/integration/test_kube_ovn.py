@@ -533,10 +533,11 @@ class BGPError(Exception):
     before=before_log(log, logging.INFO),
 )
 async def run_bird_curl_test(ops_test, unit, ip_to_curl):
-    retcode, stdout, stderr = await curl_from_unit(ops_test, unit, ip_to_curl)
-    if retcode == 0:
-        return True
-    else:
+    retcode, _, stderr = await curl_from_unit(ops_test, unit, ip_to_curl)
+    if retcode != 0:
+        log.warning(
+            "failed to reach %s from %s with (%s)", ip_to_curl, unit.name, stderr
+        )
         raise BGPError(f"failed to reach {ip_to_curl} from {unit.name}")
 
 
@@ -586,9 +587,13 @@ async def test_bgp(ops_test, kubectl, kubectl_get, scope):
     log.info("Verifying the following IPs are reachable from bird units ...")
     log.info(ips_to_curl)
     bird_app = ops_test.model.applications["bird"]
-    for unit in bird_app.units:
-        for ip in ips_to_curl:
-            assert await run_bird_curl_test(ops_test, unit, ip)
+    await asyncio.gather(
+        *(
+            run_bird_curl_test(ops_test, unit, ip)
+            for ip in ips_to_curl
+            for unit in bird_app.units
+        )
+    )
 
     await cleanup()
 
