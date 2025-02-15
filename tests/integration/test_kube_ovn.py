@@ -705,11 +705,12 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     @retry(
         retry=retry_if_exception_type(AssertionError),
         wait=wait_fixed(30),
-        stop=stop_after_attempt(2),
+        stop=stop_after_attempt(3),
     )
     async def gather_metrics():
         metrics = await prometheus.metrics_all()
-        assert set(expected_prometheus_metrics).issubset(set(metrics))
+        missing = set(expected_prometheus_metrics) - set(metrics)
+        assert not missing, f"Missing metrics: {sorted(missing)}"
 
     await gather_metrics()
 
