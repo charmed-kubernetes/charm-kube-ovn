@@ -7,6 +7,7 @@ import asyncio
 import shlex
 import shutil
 import pytest
+import pytest_asyncio
 import logging
 import json
 import re
@@ -341,7 +342,7 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
     await check_ping(0)
 
 
-@pytest.fixture()
+@pytest_asyncio.fixture()
 async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
     await kubectl("apply", "-f", manifest_path)
