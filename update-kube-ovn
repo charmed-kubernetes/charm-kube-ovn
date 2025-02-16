@@ -6,7 +6,7 @@ set -euxo pipefail
 # 2. Update manifests in templates/kube-ovn
 # 3. Update plugins/kubectl-ko
 
-tag="${tag:-$(wget -O- https://api.github.com/repos/kubeovn/kube-ovn/releases/latest | jq .tag_name -r)}"
+tag="${tag:-$(wget -O- https://api.github.com/repos/kubeovn/kube-ovn/releases/latest | jq .name -r)}"
 
 # Sync image
 image="kubeovn/kube-ovn:$tag"

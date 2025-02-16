@@ -40,7 +40,7 @@ def pytest_addoption(parser):
     )
 
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module")
 async def kubeconfig(ops_test):
     kubeconfig_path = ops_test.tmp_path / "kubeconfig"
     k8s = ops_test.model.applications["kubernetes-control-plane"]
@@ -54,7 +54,7 @@ async def kubeconfig(ops_test):
     return kubeconfig_path
 
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module")
 async def client(kubeconfig):
     config = KubeConfig.from_file(kubeconfig)
     client = Client(
@@ -77,7 +77,7 @@ def worker_node(client):
             return node
 
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module")
 async def gateway_server(ops_test):
     cmd = "exec --unit ubuntu/0 -- sudo apt install -y iperf3"
     rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
@@ -150,7 +150,7 @@ async def wait_pod_ips(client, pods):
     return ready
 
 
-@pytest.fixture()
+@pytest_asyncio.fixture()
 async def isolated_subnet(client, subnet_resource):
     log.info("Creating isolated subnet resources ...")
     path = Path("tests/data/isolated-subnet.yaml")
@@ -312,7 +312,7 @@ async def confirm_multus_removed(ops_test):
     log.info("Multus Removed")
 
 
-@pytest.fixture(scope="module")
+@pytest_asyncio.fixture(scope="module")
 async def k8s_model(ops_test: OpsTest, kubeconfig: Path, client: Client):
     machine_model = ops_test.model
     model_alias = "cos"
@@ -677,7 +677,7 @@ def annotate(client, ops_test):
     return f
 
 
-@pytest.fixture()
+@pytest_asyncio.fixture()
 async def network_policies(client):
     log.info("Creating network policy resources ...")
     path = Path("tests/data/network-policies.yaml")

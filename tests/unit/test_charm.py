@@ -896,6 +896,9 @@ def test_remote_write_consumer_changed_exception(
     mock_event.defer.assert_called_once()
 
 
+@mock.patch(
+    "charm.KubeOvnCharm.is_kubeconfig_available", mock.MagicMock(return_value=True)
+)
 @pytest.mark.parametrize("leader", [True, False])
 @mock.patch("charm.KubeOvnCharm.is_kubeconfig_available", mock.Mock(return_value=True))
 @mock.patch("charm.KubeOvnCharm.set_active_status")
@@ -908,6 +911,7 @@ def test_on_send_remote_write_departed(
     harness.set_leader(leader)
     harness.charm.stored = ops.framework.StoredState()
     harness.charm.stored.grafana_agent_configured = True
+    harness.charm.stored.kube_ovn_configured = True
     mock_event = mock.MagicMock()
     harness.charm.on_send_remote_write_departed(mock_event)
 
