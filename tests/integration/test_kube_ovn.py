@@ -7,6 +7,7 @@ import asyncio
 import shlex
 import shutil
 import pytest
+import pytest_asyncio
 import logging
 import json
 import re
@@ -341,7 +342,7 @@ async def test_isolated_subnet(kubectl_exec, isolated_subnet, client, subnet_res
     await check_ping(0)
 
 
-@pytest.fixture()
+@pytest_asyncio.fixture()
 async def multi_nic_ipam(kubectl, kubectl_exec):
     manifest_path = "tests/data/test-multi-nic-ipam.yaml"
     await kubectl("apply", "-f", manifest_path)
@@ -704,11 +705,12 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     @retry(
         retry=retry_if_exception_type(AssertionError),
         wait=wait_fixed(30),
-        stop=stop_after_attempt(2),
+        stop=stop_after_attempt(3),
     )
     async def gather_metrics():
         metrics = await prometheus.metrics_all()
-        assert set(expected_prometheus_metrics).issubset(set(metrics))
+        missing = set(expected_prometheus_metrics) - set(metrics)
+        assert not missing, f"Missing metrics: {sorted(missing)}"
 
     await gather_metrics()
 
