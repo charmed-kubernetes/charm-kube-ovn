@@ -1,20 +1,128 @@
 type: charm
+name: kube-ovn
+summary: kube-ovn
+description: kube-ovn
+links:
+  source: https://github.com/charmed-kubernetes/charm-kube-ovn
+  issues:
+  - https://bugs.launchpad.net/charm-kube-ovn
+  documentation: https://discourse.charmhub.io/t/kube-ovn-docs-index/6929
+
+subordinate: true
+
+resources:
+  kubectl-ko:
+    type: file
+    filename: kubectl-ko
+    description: |
+      kubectl plugin to help better diagnose container network.
+
+config:
+  options:
+    bgp-speakers:
+      type: string
+      default: ""
+      description: |
+        YAML defining a list of speaker configurations. Multiple speakers can be defined as separate list entries
+        Example:
+        - name: my-speaker
+          node-selector: juju-application=kubernetes-worker
+          neighbor-address: 10.32.32.1
+          neighbor-as: 65030
+          cluster-as: 65000
+          announce-cluster-ip: true
+          log-level: 2
+    control-plane-node-label:
+      type: string
+      default: "juju-application=kubernetes-control-plane"
+      description: |
+        Node label for selecting nodes to host the Kube-OVN control plane.
+    default-cidr:
+      type: string
+      default: "192.168.0.0/16"
+      description: |
+        Default pod CIDR
+    default-gateway:
+      type: string
+      default: "192.168.0.1"
+      description: |
+        Default gateway for the pod network
+    default-grafana-namespace:
+      type: string
+      default: "kube-ovn-grafana-agent"
+      description: |
+        Default namespace for the grafana agent deployment (This value cannot be changed after deployment).
+    enable-global-mirror:
+      type: boolean
+      default: false
+      description: |
+        Enable global traffic mirroring. If set to true, the mirror-iface config must also be set.
+    image-registry:
+      type: string
+      default: ""
+      description: |
+        Image registry for the kube-ovn image.
+    mirror-iface:
+      type: string
+      default: "mirror0"
+      description: |
+        Network interface to mirror traffic to. Only used when enable-global-mirror=true,
+        or when pods have been annotated with the ovn.kubernetes.io/mirror: "true" annotation.
+    node-switch-cidr:
+      type: string
+      default: "100.64.0.0/16"
+      description: |
+        CIDR for node switch (This value requires additional steps/procedures to be changed. Refer to
+        the charm docs for more information).
+    node-switch-gateway:
+      type: string
+      default: "100.64.0.1"
+      description: |
+        Gateway for node switch (This value requires additional steps/procedures to be changed. Refer to
+        the charm docs for more information).
+    pinger-external-address:
+      type: string
+      default: "8.8.8.8"
+      description: |
+        External IP address used by kube-ovn-pinger for connectivity testing.
+    pinger-external-dns:
+      type: string
+      default: "google.com"
+      description: |
+        External DNS hostname used by kube-ovn-pinger for connectivity testing.
+
+
+requires:
+  cni:
+    interface: kubernetes-cni
+    scope: container
+  send-remote-write:
+    interface: prometheus_remote_write
+provides:
+  grafana-dashboard:
+    interface: grafana_dashboard
+peers:
+  kube-ovn:
+    interface: kube-ovn
+
 parts:
   charm:
+    plugin: charm
+    source: .
     charm-python-packages: [setuptools]
 bases:
   - build-on:
     - name: "ubuntu"
-      channel: "20.04"
+      channel: "22.04"
       architectures: ["amd64"]
     run-on:
     - name: "ubuntu"
-      channel: "20.04"
+      channel: "22.04"
       architectures:
         - amd64
         - arm64
     - name: "ubuntu"
-      channel: "22.04"
+      channel: "24.04"
       architectures:
         - amd64
         - arm64
