@@ -109,7 +109,6 @@ parts:
   charm:
     plugin: charm
     source: .
-    charm-python-packages: [setuptools]
 bases:
   - build-on:
     - name: "ubuntu"

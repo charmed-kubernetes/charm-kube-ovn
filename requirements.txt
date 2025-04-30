@@ -1,3 +1,4 @@
 ops >= 1.2.0
 Jinja2 < 3.1
 pydantic <=1.9.0 # Python 3.6 support requires <= 1.9.0
+setuptools == 79.0.1
