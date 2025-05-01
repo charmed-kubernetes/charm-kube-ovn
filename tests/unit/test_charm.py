@@ -1179,13 +1179,7 @@ def test_apply_speaker(
             ["neighbor-address\n  value is not a valid IPv4 or IPv6 address"],
         ),
         (
-            {
-                "name": None,
-                "node-selector": None,
-                "neighbor-address": None,
-                "neighbor-as": None,
-                "cluster-as": None,
-            },
+            {},
             [
                 "name\n  field required",
                 "node-selector\n  field required",
@@ -1216,18 +1210,8 @@ def test_apply_speaker(
     ],
 )
 def test_speaker_config_validation(test_input, expected_msgs):
-    base = {
-        "name": "my-speaker",
-        "node-selector": "juju-application=kubernetes-worker",
-        "neighbor-address": "192.168.0.1",
-        "neighbor-as": 65030,
-        "cluster-as": 65000,
-        **test_input,
-    }
-    base = {k: v for k, v in base.items() if v is not None}
-
     with pytest.raises(ValidationError) as excinfo:
-        SpeakerConfig(**base)
+        SpeakerConfig(**test_input)
     for msg in expected_msgs:
         assert msg in str(excinfo.value)
 
