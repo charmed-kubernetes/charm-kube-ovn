@@ -8,7 +8,6 @@ import yaml
 from jinja2 import Environment, FileSystemLoader
 
 import ops
-import ops.model
 from pathlib import Path
 from subprocess import CalledProcessError, check_output
 
@@ -17,12 +16,7 @@ from charms.prometheus_k8s.v0.prometheus_remote_write import (
     PrometheusRemoteWriteConsumer,
 )
 
-from pydantic import (
-    BaseModel,
-    IPvAnyAddress,
-    ValidationError,
-    Field,
-)
+from pydantic import BaseModel, IPvAnyAddress, ValidationError, Field, constr
 
 log = logging.getLogger(__name__)
 
@@ -37,20 +31,19 @@ PROMETHEUS_RESOURCES = [
 
 
 class SpeakerConfig(BaseModel):
-    name: str = Field(
-        ...,
-        regex="^[a-z0-9.-]+$",
-    )
-    node_selector: str = Field(
+    name: constr(regex=r"^[a-z0-9.-]+$") = Field(...)
+    node_selector: constr(regex=r"^[\w./-]+=[\w.-]+$") = Field(
         ...,
         alias="node-selector",
-        regex=r"^[\w./-]+=[\w.-]+$",
     )
     neighbor_address: IPvAnyAddress = Field(..., alias="neighbor-address")
     neighbor_as: int = Field(..., alias="neighbor-as", gt=0, lt=65536)
     cluster_as: int = Field(..., alias="cluster-as", gt=0, lt=65536)
     announce_cluster_ip: bool = Field(False, alias="announce-cluster-ip")
     log_level: int = Field(2, alias="log-level", gt=-1)
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class KubeOvnCharm(ops.CharmBase):

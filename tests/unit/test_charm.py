@@ -1197,6 +1197,17 @@ def test_apply_speaker(
             ["log-level\n  ensure this value is greater than -1"],
         ),
     ],
+    ids=[
+        "empty_name",
+        "neighbor_as_zero",
+        "cluster_as_zero",
+        "neighbor_as_too_high",
+        "cluster_as_too_high",
+        "invalid_neighbor_address",
+        "missing_fields",
+        "invalid_node_selector",
+        "log_level_too_low",
+    ],
 )
 def test_speaker_config_validation(test_input, expected_msgs):
     with pytest.raises(ValidationError) as excinfo:
