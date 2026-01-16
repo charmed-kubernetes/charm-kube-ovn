@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-KUBE_OVN_NS=kube-system
+KUBE_OVN_NS=${KUBE_OVN_NS:-kube-system}
 WITHOUT_KUBE_PROXY=${WITHOUT_KUBE_PROXY:-false}
 OVN_NB_POD=
 OVN_SB_POD=
@@ -31,14 +31,13 @@ showHelp(){
   echo "  dpctl {nodeName} [ovs-dpctl options ...]   invoke ovs-dpctl on the specified node"
   echo "  appctl {nodeName} [ovs-appctl options ...]   invoke ovs-appctl on the specified node"
   echo "  tcpdump {namespace/podname} [tcpdump options ...]     capture pod traffic"
-  echo "  trace/ovn-trace ...    trace ovn microflow of specific packet"
-  echo "    trace/ovn-trace {namespace/podname} {target ip address} [target mac address] {icmp|tcp|udp} [target tcp/udp port]    trace ICMP/TCP/UDP"
-  echo "    trace/ovn-trace {namespace/podname} {target ip address} [target mac address] arp {request|reply}                     trace ARP request/reply"
-  echo "    trace/ovn-trace {node//nodename} {target ip address} [target mac address] {icmp|tcp|udp} [target tcp/udp port]       trace ICMP/TCP/UDP"
-  echo "    trace/ovn-trace {node//nodename} {target ip address} [target mac address] arp {request|reply}                        trace ARP request/reply"
+  echo "  {trace|ovn-trace} ...    trace ovn microflow of specific packet"
+  echo "    {trace|ovn-trace} {namespace/podname} {target ip address} [target mac address] {icmp|tcp|udp} [target tcp/udp port]    trace ICMP/TCP/UDP"
+  echo "    {trace|ovn-trace} {namespace/podname} {target ip address} [target mac address] arp {request|reply}                     trace ARP request/reply"
+  echo "    {trace|ovn-trace} {node//nodename} {target ip address} [target mac address] {icmp|tcp|udp} [target tcp/udp port]       trace ICMP/TCP/UDP"
+  echo "    {trace|ovn-trace} {node//nodename} {target ip address} [target mac address] arp {request|reply}                        trace ARP request/reply"
   echo "  diagnose {all|node|subnet|IPPorts} [nodename|subnetName|{proto1}-{IP1}-{Port1},{proto2}-{IP2}-{Port2}]    diagnose connectivity of all nodes or a specific node or specify subnet's ds pod or IPPorts like 'tcp-172.18.0.2-53,udp-172.18.0.3-53'"
   echo "  env-check    check the environment configuration"
-  echo "  tuning {install-fastpath|local-install-fastpath|remove-fastpath|install-stt|local-install-stt|remove-stt} {centos7|centos8}} [kernel-devel-version]    deploy kernel optimisation components to the system"
   echo "  reload    restart all kube-ovn components"
   echo "  log {kube-ovn|ovn|ovs|linux|all}    save log to ./kubectl-ko-log/"
   echo "  perf [image] performance test default image is docker.io/kubeovn/test:v1.13.0"
@@ -161,23 +160,28 @@ tcpdump(){
     exit 1
   fi
 
-  ovnCni=$(kubectl get pod -n $KUBE_OVN_NS -l app=kube-ovn-cni -o 'jsonpath={.items[?(@.spec.nodeName=="'$nodeName'")].metadata.name}')
-  if [ -z "$ovnCni" ]; then
-    echo "kube-ovn-cni not exist on node $nodeName"
+  ovsPod=$(kubectl get pod -n $KUBE_OVN_NS -l app=ovs -o 'jsonpath={.items[?(@.spec.nodeName=="'$nodeName'")].metadata.name}')
+  if [ -z "$ovsPod" ]; then
+    echo "ovs-ovn not exist on node $nodeName"
     exit 1
   fi
 
   if [ "$hostNetwork" = "true" ]; then
     set -x
-    kubectl exec "$ovnCni" -n $KUBE_OVN_NS -- tcpdump -nn "$@"
+    kubectl exec "$ovsPod" -n $KUBE_OVN_NS -- tcpdump -nn "$@"
   else
-    nicName=$(kubectl exec "$ovnCni" -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading --columns=name find interface external-ids:iface-id="$podName"."$namespace" | tr -d '\r')
+    nicName=$(kubectl exec "$ovsPod" -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading --columns=name find interface external-ids:iface-id="$podName"."$namespace" | tr -d '\r')
     if [ -z "$nicName" ]; then
       echo "nic doesn't exist on node $nodeName"
       exit 1
     fi
     podNicType=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/pod_nic_type})
-    podNetNs=$(kubectl exec "$ovnCni" -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading get interface "$nicName" external-ids:pod_netns | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')
+    podNetNs=$(kubectl exec "$ovsPod" -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading get interface "$nicName" external-ids:pod_netns | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')
+    ovnCni=$(kubectl get pod -n $KUBE_OVN_NS -l app=kube-ovn-cni -o 'jsonpath={.items[?(@.spec.nodeName=="'$nodeName'")].metadata.name}')
+    if [ -z "$ovnCni" ]; then
+      echo "kube-ovn-cni not exist on node $nodeName"
+      exit 1
+    fi
     set -x
     if [ "$podNicType" = "internal-port" ]; then
       kubectl exec "$ovnCni" -n $KUBE_OVN_NS -- nsenter --net="$podNetNs" tcpdump -nn -i "$nicName" "$@"
@@ -278,9 +282,9 @@ trace(){
     exit 1
   fi
 
-  local ovnCni=$(kubectl get pod -n $KUBE_OVN_NS -l app=kube-ovn-cni -o 'jsonpath={.items[?(@.spec.nodeName=="'$node'")].metadata.name}')
-  if [ -z "$ovnCni" ]; then
-    echo "Error: no kube-ovn-cni Pod running on node $nodeName"
+  local ovsPod=$(kubectl get pod -n $KUBE_OVN_NS -l app=ovs -o 'jsonpath={.items[?(@.spec.nodeName=="'$node'")].metadata.name}')
+  if [ -z "$ovsPod" ]; then
+    echo "Error: no ovs-ovn Pod running on node $nodeName"
     exit 1
   fi
 
@@ -314,6 +318,12 @@ trace(){
         exit 1
       fi
 
+      ovnCni=$(kubectl get pod -n $KUBE_OVN_NS -l app=kube-ovn-cni -o 'jsonpath={.items[?(@.spec.nodeName=="'$node'")].metadata.name}')
+      if [ -z "$ovnCni" ]; then
+        echo "kube-ovn-cni not exist on node $node"
+        exit 1
+      fi
+
       local vlan=$(kubectl get subnet "$ls" -o jsonpath={.spec.vlan})
       local logicalGateway=$(kubectl get subnet "$ls" -o jsonpath={.spec.logicalGateway})
       local u2oIC=$(kubectl get subnet "$ls" -o jsonpath={.spec.u2oInterconnection})
@@ -327,21 +337,21 @@ trace(){
           fi
         fi
 
-        local nicName=$(kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading --columns=name find interface external-ids:iface-id="$lsp" | tr -d '\r')
+        local nicName=$(kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading --columns=name find interface external-ids:iface-id="$lsp" | tr -d '\r')
         if [ -z "$nicName" ]; then
           echo "Error: failed to find ovs interface for LSP $lsp"
           exit 1
         fi
 
         local podNicType=$(kubectl get "$typedName" $optNamespace -o jsonpath={.metadata.annotations.ovn\\.kubernetes\\.io/pod_nic_type})
-        local podNetNs=$(kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading get interface "$nicName" external-ids:pod_netns | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')
+        local podNetNs=$(kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-vsctl --data=bare --no-heading get interface "$nicName" external-ids:pod_netns | tr -d '\r' | sed -e 's/^"//' -e 's/"$//')
         local nicName= nsenterCmd=
         if [ ! -z $podNetNs ]; then
           nsenterCmd="nsenter --net='$podNetNs'"
         fi
         if [ "$podNicType" != "internal-port" ]; then
-          local interface=$(kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-vsctl --format=csv --data=bare --no-heading --columns=name find interface external_id:iface-id="$lsp")
-          local peer=$(kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ip link show $interface | grep -oE "^[0-9]+:\\s$interface@if[0-9]+" | awk -F @ '{print $2}')
+          local interface=$(kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-vsctl --format=csv --data=bare --no-heading --columns=name find interface external_id:iface-id="$lsp")
+          local peer=$(kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ip link show $interface | grep -oE "^[0-9]+:\\s$interface@if[0-9]+" | awk -F @ '{print $2}')
           local peerIndex=${peer//if/}
           local peer=$(kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- sh -c "$nsenterCmd ip link show type veth" | grep "^$peerIndex:" | awk -F @ '{print $1}')
           nicName=$(echo $peer | awk '{print $2}')
@@ -409,22 +419,36 @@ trace(){
 
   case $type in
     icmp)
+      icmp_type=""
+      if [ $af -eq 6 ]; then
+        # echo request
+        icmp_type="6.type == 128"
+      fi
       set -x
-      kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace "$ls" "inport == \"$lsp\" && ip.ttl == 64 && icmp && eth.src == $mac && ip$af.src == $srcIP && eth.dst == $dstMac && ip$af.dst == $dst && ct.new"
+      kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace --ct=new --ct=new --ct=new --ct=new "$ls" \
+        "inport == \"$lsp\" && ip.ttl == 255 && icmp$icmp_type && eth.src == $mac && ip$af.src == $srcIP && eth.dst == $dstMac && ip$af.dst == $dst"
       ;;
     tcp|udp)
+      tcp_flags=""
+      if [ "$type" = "tcp" ]; then
+        # TCP SYN
+        tcp_flags=" && tcp.flags == 2"
+      fi
       set -x
-      kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace "$ls" "inport == \"$lsp\" && ip.ttl == 64 && eth.src == $mac && ip$af.src == $srcIP && eth.dst == $dstMac && ip$af.dst == $dst && $type.src == 10000 && $type.dst == $4 && ct.new"
+      kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace --ct=new --ct=new --ct=new --ct=new "$ls" \
+        "inport == \"$lsp\" && ip.ttl == 255 && eth.src == $mac && ip$af.src == $srcIP && eth.dst == $dstMac && ip$af.dst == $dst && $type.src == 30000 && $type.dst == $4 $tcp_flags"
       ;;
     arp)
       case "$4" in
         ""|request)
           set -x
-          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace "$ls" "inport == \"$lsp\" && eth.src == $mac && eth.dst == $dstMac && arp.op == 1 && arp.sha == $mac && arp.tha == 00:00:00:00:00:00 && arp.spa == $srcIP && arp.tpa == $dst"
+          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace "$ls" \
+            "inport == \"$lsp\" && eth.src == $mac && eth.dst == $dstMac && arp.op == 1 && arp.sha == $mac && arp.tha == 00:00:00:00:00:00 && arp.spa == $srcIP && arp.tpa == $dst"
           ;;
         reply)
           set -x
-          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace "$ls" "inport == \"$lsp\" && eth.src == $mac && eth.dst == $dstMac && arp.op == 2 && arp.sha == $mac && arp.tha == $dstMac && arp.spa == $srcIP && arp.tpa == $dst"
+          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-trace "$ls" \
+            "inport == \"$lsp\" && eth.src == $mac && eth.dst == $dstMac && arp.op == 2 && arp.sha == $mac && arp.tha == $dstMac && arp.spa == $srcIP && arp.tpa == $dst"
           ;;
         *)
           echo "Error: invalid ARP type $4"
@@ -454,25 +478,25 @@ trace(){
   echo ""
   echo ""
 
-  local inPort=$(kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-vsctl --format=csv --data=bare --no-heading --columns=ofport find interface external_id:iface-id="$lsp")
+  local inPort=$(kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-vsctl --format=csv --data=bare --no-heading --columns=ofport find interface external_id:iface-id="$lsp")
   case $type in
     icmp)
       set -x
-      kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,icmp$proto,nw_ttl=64,${nw}_src=$srcIP,${nw}_dst=$dst,dl_src=$mac,dl_dst=$dstMac"
+      kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,icmp$proto,nw_ttl=64,${nw}_src=$srcIP,${nw}_dst=$dst,dl_src=$mac,dl_dst=$dstMac"
       ;;
     tcp|udp)
       set -x
-      kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,$type$proto,nw_ttl=64,${nw}_src=$srcIP,${nw}_dst=$dst,dl_src=$mac,dl_dst=$dstMac,${type}_src=1000,${type}_dst=$4"
+      kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,$type$proto,nw_ttl=64,${nw}_src=$srcIP,${nw}_dst=$dst,dl_src=$mac,dl_dst=$dstMac,${type}_src=1000,${type}_dst=$4"
       ;;
     arp)
       case "$4" in
         ""|request)
           set -x
-          kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,arp,arp_op=1,dl_src=$mac,dl_dst=$dstMac,arp_spa=$srcIP,arp_tpa=$dst,arp_sha=$mac,arp_tha=00:00:00:00:00:00"
+          kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,arp,arp_op=1,dl_src=$mac,dl_dst=$dstMac,arp_spa=$srcIP,arp_tpa=$dst,arp_sha=$mac,arp_tha=00:00:00:00:00:00"
           ;;
         reply)
           set -x
-          kubectl exec "$ovnCni" -c cni-server -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,arp,arp_op=2,dl_src=$mac,dl_dst=$dstMac,arp_spa=$srcIP,arp_tpa=$dst,arp_sha=$mac,arp_tha=$dstMac"
+          kubectl exec "$ovsPod" -c openvswitch -n $KUBE_OVN_NS -- ovs-appctl ofproto/trace br-int "in_port=$inPort,arp,arp_op=2,dl_src=$mac,dl_dst=$dstMac,arp_spa=$srcIP,arp_tpa=$dst,arp_sha=$mac,arp_tha=$dstMac"
           ;;
       esac
       ;;
@@ -494,7 +518,7 @@ xxctl(){
 checkLeader(){
   component="$1"; shift
   set +o pipefail
-  count=$(kubectl get ep ovn-$component -n $KUBE_OVN_NS -o yaml | grep ip | wc -l)
+  count=$(kubectl get endpointslice -l kubernetes.io/service-name=ovn-$component -n $KUBE_OVN_NS -o jsonpath='{range .items[*]}{range .endpoints[?(@.conditions.ready!=false)]}{.targetRef.name}{"\n"}{end}{end}' | sort | uniq | wc -l)
   set -o pipefail
   if [ $count -eq 0 ]; then
     echo "no ovn-$component exists !!"
@@ -538,6 +562,10 @@ spec:
         app: $CONN_CHECK_LABEL
     spec:
       serviceAccountName: kube-ovn-app
+      automountServiceAccountToken: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: $subnetName-$CONN_CHECK_SERVER
           imagePullPolicy: IfNotPresent
@@ -615,15 +643,37 @@ diagnose(){
   gcCommands=()
   kubectl get crd vpcs.kubeovn.io
   kubectl get crd vpc-nat-gateways.kubeovn.io
+  kubectl get crd vpc-egress-gateways.kubeovn.io
   kubectl get crd subnets.kubeovn.io
   kubectl get crd ips.kubeovn.io
   kubectl get crd vlans.kubeovn.io
   kubectl get crd provider-networks.kubeovn.io
+  kubectl get crd security-groups.kubeovn.io
+  kubectl get crd vips.kubeovn.io
+  kubectl get crd vpc-dnses.kubeovn.io
+  kubectl get crd switch-lb-rules.kubeovn.io
+  kubectl get crd ippools.kubeovn.io
+  kubectl get crd ovn-eips.kubeovn.io
+  kubectl get crd ovn-fips.kubeovn.io
+  kubectl get crd ovn-dnat-rules.kubeovn.io
+  kubectl get crd ovn-snat-rules.kubeovn.io
+  kubectl get crd iptables-eips.kubeovn.io
+  kubectl get crd iptables-fip-rules.kubeovn.io
+  kubectl get crd iptables-snat-rules.kubeovn.io
+  kubectl get crd iptables-dnat-rules.kubeovn.io
+
   set +eu
   if ! kubectl get svc kube-dns -n kube-system ; then
      echo "Warning: kube-dns doesn't exist, maybe there is coredns service."
   fi
+  if [[ -z "$1" ]]; then
+      echo "diagnose all......"
+      type="all"
+  else
+      type="$1"
+  fi
   set -eu
+
   kubectl get svc kubernetes -n default
   kubectl get sa -n kube-system ovn
   kubectl get clusterrole system:ovn
@@ -637,6 +687,8 @@ diagnose(){
   kubectl ko nbctl list address_set
   kubectl ko nbctl list acl
   kubectl ko sbctl show
+  kubectl ko sb status
+  kubectl ko nb status
 
   if [ "${WITHOUT_KUBE_PROXY}" = "false" ]; then
     checkKubeProxy
@@ -656,14 +708,12 @@ diagnose(){
     if [ ! ${#gcCommands[@]} -eq 0 ]; then
       for item in "${gcCommands[@]}"
       do
-          echo $item
+          echo "$item"
           eval "$item"
       done
     fi
   }
   trap quitDiagnose EXIT
-
-  type="$1"
 
   if [[ $type != "IPPorts" ]]; then
     gcCommands+=("kubectl delete svc -l app=$CONN_CHECK_LABEL -n $KUBE_OVN_NS")
@@ -693,7 +743,7 @@ diagnose(){
         kubectl exec -n $KUBE_OVN_NS "$pinger" -- ovs-vsctl show
         echo ""
         echo "#### pinger diagnose results:"
-        kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --external-address=114.114.114.114,2400:3200::1 --target-ip-ports=$targetIPPorts
+        kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --external-address=1.1.1.1,2606:4700:4700::1111 --target-ip-ports=$targetIPPorts
         echo "### finish diagnose node $nodeName"
         echo ""
       done
@@ -701,6 +751,8 @@ diagnose(){
     node)
       nodeName="$2"
       kubectl get no "$nodeName" > /dev/null
+      echo "### make sure kube-ovn-pinger running on node $nodeName"
+      kubectl -n $KUBE_OVN_NS get po -l app=kube-ovn-pinger
       pinger=$(kubectl -n $KUBE_OVN_NS get po -l app=kube-ovn-pinger -o 'jsonpath={.items[?(@.spec.nodeName=="'$nodeName'")].metadata.name}')
       if [ ! -n "$pinger" ]; then
         echo "Error: No kube-ovn-pinger running on node $nodeName"
@@ -713,7 +765,7 @@ diagnose(){
       echo "#### ovs-vswitchd log:"
       kubectl exec -n $KUBE_OVN_NS "$pinger" -- tail /var/log/openvswitch/ovs-vswitchd.log
       echo ""
-      kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --external-address=114.114.114.114,2400:3200::1 --target-ip-ports=$targetIPPorts
+      kubectl exec -n $KUBE_OVN_NS "$pinger" -- /kube-ovn/kube-ovn-pinger --mode=job --external-address=1.1.1.1,2606:4700:4700::1111 --target-ip-ports=$targetIPPorts
       echo "### finish diagnose node $nodeName"
       echo ""
       ;;
@@ -878,11 +930,11 @@ dbtool(){
     nb)
       case $action in
         status)
-          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound
-          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnnb_db.ctl ovsdb-server/get-db-storage-status OVN_Northbound
+          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/status OVN_Northbound
+          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnnb_db.ctl ovsdb-server/get-db-storage-status OVN_Northbound
           ;;
         kick)
-          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/kick OVN_Northbound "$1"
+          kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnnb_db.ctl cluster/kick OVN_Northbound "$1"
           ;;
         backup)
           kubectl exec "$OVN_NB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovsdb-tool cluster-to-standalone /etc/ovn/ovnnb_db.$suffix.backup /etc/ovn/ovnnb_db.db
@@ -965,11 +1017,11 @@ dbtool(){
     sb)
       case $action in
         status)
-          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound
-          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnsb_db.ctl ovsdb-server/get-db-storage-status OVN_Southbound
+          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/status OVN_Southbound
+          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnsb_db.ctl ovsdb-server/get-db-storage-status OVN_Southbound
           ;;
         kick)
-          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovs-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/kick OVN_Southbound "$1"
+          kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovn-appctl -t /var/run/ovn/ovnsb_db.ctl cluster/kick OVN_Southbound "$1"
           ;;
         backup)
           kubectl exec "$OVN_SB_POD" -n $KUBE_OVN_NS -c ovn-central -- ovsdb-tool cluster-to-standalone /etc/ovn/ovnsb_db.$suffix.backup /etc/ovn/ovnsb_db.db
@@ -989,141 +1041,6 @@ dbtool(){
       ;;
     *)
       echo "unknown subcommand $component"
-  esac
-}
-
-tuning(){
-  action="$1"; shift
-  sys="$1"; shift
-  case $action in
-    install-fastpath)
-      case $sys in
-        centos7)
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp/:/tmp/ $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh  centos install"
-          while [ ! -f /tmp/kube_ovn_fastpath.ko ];
-          do
-            sleep 1
-          done
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
-          done
-          ;;
-        centos8)
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp/:/tmp/ $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh  centos install"
-          while [ ! -f /tmp/kube_ovn_fastpath.ko ];
-          do
-            sleep 1
-          done
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
-          done
-          ;;
-        *)
-          echo "unknown system $sys"
-      esac
-      ;;
-    local-install-fastpath)
-      case $sys in
-        centos7)
-          # shellcheck disable=SC2145
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh centos local-install $@"
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
-          done
-          ;;
-        centos8)
-          # shellcheck disable=SC2145
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh centos local-install $@"
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            kubectl cp /tmp/kube_ovn_fastpath.ko kube-system/"$i":/tmp/
-          done
-          ;;
-        *)
-          echo "unknown system $sys"
-      esac
-      ;;
-    remove-fastpath)
-      case $sys in
-        centos)
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            kubectl -n kube-system exec "$i" -- rm -f /tmp/kube_ovn_fastpath.ko
-          done
-          ;;
-        *)
-          echo "unknown system $sys"
-      esac
-      ;;
-    install-stt)
-      case $sys in
-        centos7)
-          # shellcheck disable=SC2145
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt install"
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            for k in /tmp/*.rpm; do
-              kubectl cp "$k" kube-system/"$i":/tmp/
-            done
-          done
-          ;;
-        centos8)
-          # shellcheck disable=SC2145
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt install"
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            for k in /tmp/*.rpm; do
-              kubectl cp "$k" kube-system/"$i":/tmp/
-            done
-          done
-          ;;
-        *)
-          echo "unknown system $sys"
-      esac
-      ;;
-    local-install-stt)
-      case $sys in
-        centos7)
-          # shellcheck disable=SC2145
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos7-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt local-install $@"
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            for k in /tmp/*.rpm; do
-              kubectl cp "$k" kube-system/"$i":/tmp/
-            done
-          done
-          ;;
-        centos8)
-          # shellcheck disable=SC2145
-          docker run -it --privileged -v /lib/modules:/lib/modules -v /usr/src:/usr/src -v /tmp:/tmp $REGISTRY/centos8-compile:"$KUBE_OVN_VERSION" bash -c "./module.sh stt local-install $@"
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            for k in /tmp/*.rpm; do
-              kubectl cp "$k" kube-system/"$i":/tmp/
-            done
-          done
-          ;;
-        *)
-          echo "unknown system $sys"
-      esac
-      ;;
-    remove-stt)
-      case $sys in
-        centos)
-          for i in $(kubectl -n kube-system get pods | grep ovn-cni | awk '{print $1}');
-          do
-            kubectl -n kube-system exec "$i" -- rm -f /tmp/openvswitch-kmod*.rpm
-          done
-          ;;
-        *)
-          echo "unknown system $sys"
-      esac
-      ;;
-    *)
-      echo "unknown action $action"
   esac
 }
 
@@ -1189,63 +1106,114 @@ log_linux(){
   component_param=$1
   sub_component_param=$2
   echo "Collecting $component_param $sub_component_param files"
-  podNames=`kubectl get pod -n kube-system -l app=ovs -o 'jsonpath={.items[*].metadata.name}'`
+  podNames=`kubectl get pod -n kube-system -l app=kube-ovn-cni -o 'jsonpath={.items[*].metadata.name}'`
   for pod in $podNames; do
     nodeName=$(kubectl get pod "$pod" -n kube-system -o jsonpath={.spec.nodeName})
     mkdir -p ./kubectl-ko-log/$nodeName/$component_param
-    if [[ "$sub_component_param" == "dmesg" ]]; then
-      kubectl exec $pod -n kube-system -- dmesg -T > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "iptables-legacy" ]]; then
-      kubectl exec $pod -n kube-system -- /usr/sbin/iptables-legacy -V > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-      echo "******************legacy filter v4 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/iptables-legacy -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-      echo "****************** legacy nat v4 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/iptables-legacy -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-      echo "******************legacy filter v6 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-legacy -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-      echo "****************** legacy nat v6 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-legacy -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "iptables-nft" ]]; then
-      kubectl exec $pod -n kube-system -- /usr/sbin/iptables-nft -V > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log 2>/dev/null || :
-      echo "*********************nft filter v4 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/iptables-nft -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log 2>/dev/null || :
-      echo "********************* nft nat v4 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/iptables-nft -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log 2>/dev/null || :
-      echo "*********************nft filter v6 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-nft -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log 2>/dev/null || :
-      echo "********************* nft nat v6 ************************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
-      kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-nft -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log 2>/dev/null || :
-    elif [[ "$sub_component_param" == "route" ]]; then
-      kubectl exec $pod -n kube-system -- ip route show > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-      kubectl exec $pod -n kube-system -- ip -6 route show >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "link" ]]; then
-      kubectl exec $pod -n kube-system -- ip -d link show > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "neigh" ]]; then
-      kubectl exec $pod -n kube-system -- ip n > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-      kubectl exec $pod -n kube-system -- ip -6 n >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "memory" ]]; then
-      kubectl exec $pod -n kube-system -- free -m > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "top" ]]; then
-      kubectl exec $pod -n kube-system -- top -b -n 1 > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "sysctl" ]]; then
-      kubectl exec $pod -n kube-system -- sysctl -a > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "netstat" ]]; then
-      kubectl exec $pod -n kube-system -- netstat -tunlp > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "addr" ]]; then
-      kubectl exec $pod -n kube-system -- ip addr show > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "ipset" ]]; then
-      kubectl exec $pod -n kube-system -- ipset list > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    elif [[ "$sub_component_param" == "tcp" ]]; then
-      kubectl exec $pod -n kube-system -- cat /proc/net/sockstat > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
-    fi
+    case $sub_component_param in
+      dmesg)
+        kubectl exec $pod -n kube-system -- dmesg -T > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      iptables-legacy)
+        kubectl exec $pod -n kube-system -- /usr/sbin/iptables-legacy -V > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** legacy filter v4 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/iptables-legacy -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** legacy nat v4 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/iptables-legacy -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** legacy filter v6 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-legacy -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** legacy nat v6 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-legacy -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      iptables-nft)
+        kubectl exec $pod -n kube-system -- /usr/sbin/iptables-nft -V > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** nft filter v4 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/iptables-nft -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** nft nat v4 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/iptables-nft -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** nft filter v6 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-nft -S >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** nft nat v6 ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- /usr/sbin/ip6tables-nft -S -t nat >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      route)
+        kubectl exec $pod -n kube-system -- ip -4 route show > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        kubectl exec $pod -n kube-system -- ip -6 route show >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      link)
+        kubectl exec $pod -n kube-system -- ip -d -s link show > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      neigh)
+        kubectl exec $pod -n kube-system -- ip -4 n > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        kubectl exec $pod -n kube-system -- ip -6 n >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      xfrm)
+        echo "****************** policy ******************" > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- ip xfrm policy >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** state ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- ip xfrm state >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      memory)
+        kubectl exec $pod -n kube-system -- free -m > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      top)
+        kubectl exec $pod -n kube-system -- top -b -n 1 > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      sysctl)
+        kubectl exec $pod -n kube-system -- sysctl -a > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      netstat)
+        kubectl exec $pod -n kube-system -- netstat -tunlp > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      addr)
+        kubectl exec $pod -n kube-system -- ip addr show > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      ipset)
+        kubectl exec $pod -n kube-system -- ipset list > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      tcp)
+        kubectl exec $pod -n kube-system -- cat /proc/net/sockstat > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+      ipsec)
+        echo "****************** config ******************" > ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- cat /etc/ipsec.conf >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** ca certs ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- ipsec listcacerts >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** certs ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- ipsec listcerts >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        echo "****************** status ******************" >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log
+        kubectl exec $pod -n kube-system -- ipsec statusall >> ./kubectl-ko-log/$nodeName/$component_param/$sub_component_param.log || :
+        ;;
+    esac
   done
 }
 
-
 log(){
   component="$1"
-  components=("kube-ovn" "ovs" "ovn" "linux" "all")
-  linux_sub_components=("dmesg" "iptables-legacy" "iptables-nft" "route" "link" "neigh" "memory" "top" "sysctl" "netstat" "addr" "ipset" "tcp")
+  components=(
+    kube-ovn
+    ovs
+    ovn
+    linux
+    all
+  )
+  linux_sub_components=(
+    dmesg
+    iptables-legacy
+    iptables-nft
+    route
+    link
+    neigh
+    memory
+    top
+    sysctl
+    netstat
+    addr
+    ipset
+    tcp
+    ipsec
+    xfrm
+  )
 
   if [[ ! " ${components[@]} " =~ " $component " ]]; then
       echo "invalid component $component"
@@ -1289,6 +1257,9 @@ metadata:
     app: $PERF_LABEL
     env: server
 spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: $podName
       image: $imageID
@@ -1317,6 +1288,9 @@ metadata:
     app: $PERF_LABEL
 spec:
   hostNetwork: true
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: $podName
       image: $imageID
@@ -1344,11 +1318,14 @@ metadata:
   labels:
     app: $PERF_LABEL
 spec:
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: $podName
       image: $imageID
       imagePullPolicy: IfNotPresent
-      command: ["sh", "-c", "sleep infinity"]
+      command: ["sleep", "infinity"]
   nodeSelector:
     kubernetes.io/hostname: $nodeID
 EOF
@@ -1368,11 +1345,14 @@ metadata:
     app: $PERF_LABEL
 spec:
   hostNetwork: true
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault
   containers:
     - name: $podName
       image: $imageID
       imagePullPolicy: IfNotPresent
-      command: ["sh", "-c", "sleep infinity"]
+      command: ["sleep", "infinity"]
   nodeSelector:
     kubernetes.io/hostname: $nodeID
 EOF
@@ -1462,15 +1442,15 @@ perf(){
   imageID=${1:-"docker.io/kubeovn/test:v1.13.0"}
 
   nodes=($(kubectl get node --no-headers -o custom-columns=NAME:.metadata.name))
-  if [[ ${#nodes} -eq 1 ]]; then
+  if [[ ${#nodes[@]} -eq 1 ]]; then
     applyTestClient ${nodes[0]} $imageID
     applyTestHostClient ${nodes[0]} $imageID
     applyTestServer ${nodes[0]} $imageID
     applyTestHostServer ${nodes[0]} $imageID
-  elif [[ ${#nodes} -le 0 ]]; then
+  elif [[ ${#nodes[@]} -le 0 ]]; then
     echo "can't find node in the cluster"
     return
-  elif [[ ${#nodes} -ge 2 ]]; then
+  elif [[ ${#nodes[@]} -ge 2 ]]; then
     applyTestClient ${nodes[1]} $imageID
     applyTestHostClient ${nodes[1]} $imageID
     applyTestServer ${nodes[0]} $imageID
@@ -1681,7 +1661,7 @@ case $subcommand in
   icsbctl)
     getOVNICSBPod
     kubectl exec "$OVN_IC_SB_POD" -n $KUBE_OVN_NS -- ovn-ic-sbctl "$@"
-    ;; 
+    ;;
   vsctl|ofctl|dpctl|appctl)
     xxctl "$subcommand" "$@"
     ;;
@@ -1706,9 +1686,6 @@ case $subcommand in
     ;;
   reload)
     reload
-    ;;
-  tuning)
-    tuning "$@"
     ;;
   env-check)
     env-check
