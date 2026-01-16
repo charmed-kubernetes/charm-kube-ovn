@@ -125,6 +125,7 @@ class KubeOvnCharm(ops.CharmBase):
             "kube-ovn/kube-ovn.yaml",
             "kube-ovn/kube-ovn-app-sa.yaml",
             "kube-ovn/kube-ovn-cni-sa.yaml",
+            "kube-ovn/kube-ovn-pinger.yaml",
             "kube-ovn/kube-ovn-sa.yaml",
         )
         control_plane_node_label = self.model.config["control-plane-node-label"]
