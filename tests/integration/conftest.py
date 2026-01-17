@@ -7,6 +7,7 @@ import pytest_asyncio
 import logging
 
 from pathlib import Path
+from juju.unit import Unit
 import yaml
 import shlex
 from kubernetes import config as k8s_config
@@ -27,7 +28,8 @@ from tenacity import (
 
 
 log = logging.getLogger(__name__)
-GRAFANA = "grafana-k8s"
+GRAFANA, PROMETHEUS = "grafana-k8s", "prometheus-k8s"
+COS_MODEL = {"multus": "edge", GRAFANA: "1/stable", PROMETHEUS: "1/stable"}
 BIRD = "bird"
 NUM_BIRD_UNITS = 3
 
@@ -79,21 +81,21 @@ def worker_node(client):
 
 @pytest_asyncio.fixture(scope="module")
 async def gateway_server(ops_test):
-    cmd = "exec --unit ubuntu/0 -- sudo apt install -y iperf3"
-    rc, stdout, stderr = await ops_test.juju(*shlex.split(cmd))
-    assert rc == 0, f"Failed to install iperf3: {(stdout or stderr).strip()}"
+    with ops_test.model_context("main") as main:
+        ubuntu_app = main.applications["ubuntu"]
+        ubuntu_unit = ubuntu_app.units[0]
+    await apt_install_iperf3(ubuntu_unit)
 
-    iperf3_cmd = "iperf3 -s --daemon"
-    cmd = f"juju exec --unit ubuntu/0 -- {iperf3_cmd}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to run iperf3 server: {(stdout or stderr).strip()}"
+    try:
+        desc = "Starting iperf3 server"
+        await _unit_check_output(ubuntu_unit, "iperf3 -s --daemon", desc)
 
-    cmd = "juju show-unit ubuntu/0"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert rc == 0, f"Failed to get ubuntu/0 unit data: {(stdout or stderr).strip()}"
+        log.info("Getting %s unit IP ...", ubuntu_unit.name)
+        yield ubuntu_unit.public_address
 
-    unit_data = yaml.safe_load(stdout)
-    return unit_data["ubuntu/0"]["public-address"]
+    finally:
+        desc = "Stopping iperf3 server"
+        await _unit_check_output(ubuntu_unit, "pkill -f 'iperf3 -s'", desc)
 
 
 @pytest.fixture()
@@ -281,6 +283,26 @@ def module_name(request):
     return request.module.__name__.replace("_", "-")
 
 
+async def _unit_check_output(
+    unit: Unit, cmd: str, description: str
+) -> Tuple[int, str, str]:
+    """Run a command on a unit and return the exit code, stdout, and stderr.
+
+    Args:
+        unit: The Juju unit to run the command on.
+        cmd: The command to run.
+        description: Description of the command being run, for logging purposes.
+    Returns:
+        A tuple containing the exit code, stdout, and stderr.
+    """
+    log.info("Running %s on %s ...", description, unit.name)
+    rc = await unit.run(cmd, block=True)
+    stdout, stderr = rc.results.get("stdout", ""), rc.results.get("stderr", "")
+    exit_code = rc.results["return-code"]
+    assert exit_code == 0, f"Failed {cmd} on {unit.name}:\n{stdout=}\n{stderr=}"
+    return exit_code, stdout, stderr
+
+
 @retry(
     retry=retry_if_exception_type(AssertionError),
     stop=stop_after_delay(60 * 10),
@@ -288,28 +310,35 @@ def module_name(request):
 )
 async def confirm_multus_installed(ops_test):
     model = ops_test.model
-    model_name = ops_test.model_full_name
     for unit in model.applications["kubernetes-worker"].units:
-        log.info(f"Confirming multus config on unit {unit.name}")
-        multus_match = "sudo ls /etc/cni/net.d | grep multus"
-        ssh_cmd = f"ssh -m {model_name} {unit.name} -- {multus_match}"
-        rc, *_ = await ops_test.juju(*shlex.split(ssh_cmd))
+        cmd = "ls /etc/cni/net.d | grep multus"
+        rc, _, _ = await _unit_check_output(unit, cmd, "Confirming multus config")
         assert rc == 0, f"Multus not yet on {unit.name}"
     log.info("Multus Installed")
 
 
 async def confirm_multus_removed(ops_test):
     model = ops_test.model
-    model_name = ops_test.model_full_name
     for unit in model.applications["kubernetes-worker"].units:
         commands = (
-            "sudo rm -rf /etc/cni/net.d/multus.d",
-            "sudo rm -rf /etc/cni/net.d/00-multus.conf",
+            "rm -rf /etc/cni/net.d/multus.d",
+            "rm -rf /etc/cni/net.d/00-multus.conf",
         )
-        for command in commands:
-            ssh_cmd = f"ssh -m {model_name} {unit.name} -- {command}"
-            await ops_test.juju(*shlex.split(ssh_cmd))
+        for cmd in commands:
+            await _unit_check_output(unit, cmd, "Confirming multus removal")
     log.info("Multus Removed")
+
+
+@retry(
+    stop=stop_after_delay(60 * 10),
+    wait=wait_fixed(1),
+)
+async def apt_install_iperf3(unit: Unit):
+    """
+    Ensure that iperf3 is installed on the machine unit.
+    """
+    await _unit_check_output(unit, "apt update", "Updating apt cache")
+    await _unit_check_output(unit, "apt install -y iperf3", "Installing iperf3")
 
 
 @pytest_asyncio.fixture(scope="module")
@@ -329,15 +358,15 @@ async def k8s_model(ops_test: OpsTest, kubeconfig: Path, client: Client):
     try:
         await asyncio.gather(
             *(
-                k8s_model.deploy(app, trust=True, channel="edge")
-                for app in ("multus", GRAFANA, "prometheus-k8s")
+                k8s_model.deploy(app, trust=True, channel=channel)
+                for app, channel in COS_MODEL.items()
             )
         )
         saas_model = f"{k8s_model.info.users[0].display_name}/{k8s_model.name}"
         await k8s_model.create_offer(f"{GRAFANA}:grafana-dashboard")
-        await k8s_model.create_offer("prometheus-k8s:receive-remote-write")
+        await k8s_model.create_offer(f"{PROMETHEUS}:receive-remote-write")
         saases.append(await machine_model.consume(f"{saas_model}.{GRAFANA}"))
-        saases.append(await machine_model.consume(f"{saas_model}.prometheus-k8s"))
+        saases.append(await machine_model.consume(f"{saas_model}.{PROMETHEUS}"))
 
         async with ops_test.fast_forward():
             # The o11y charms like to error occasionally -- just wait for stable
@@ -347,7 +376,7 @@ async def k8s_model(ops_test: OpsTest, kubeconfig: Path, client: Client):
 
         # the o11y charms seems to not evaluate their relations until after the units are active/idle
         await machine_model.relate("kube-ovn:grafana-dashboard", GRAFANA)
-        await machine_model.relate("kube-ovn:send-remote-write", "prometheus-k8s")
+        await machine_model.relate("kube-ovn:send-remote-write", PROMETHEUS)
         async with ops_test.fast_forward():
             await k8s_model.wait_for_idle(
                 status="active", timeout=60 * 5, raise_on_error=False
@@ -561,7 +590,7 @@ async def bird(ops_test: OpsTest):
     )
     await ops_test.model.wait_for_idle(status="active", timeout=60 * 10)
 
-    yield
+    yield bird_app
 
     log.info("Setting empty bgp-speakers config ...")
     await kube_ovn_app.set_config({"bgp-speakers": ""})
@@ -576,18 +605,8 @@ async def bird(ops_test: OpsTest):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def bird_container_ip(ops_test, bird) -> ipaddress.IPv4Address:
-    bird_app = ops_test.model.applications[BIRD]
-    bird_unit = bird_app.units[0]
-    unit_name = bird_unit.name
-
-    async def exec_on_unit(cmd, description):
-        log.info(f"Running command to {description} ...")
-        rc, stdout, stderr = await ops_test.juju(
-            *shlex.split(f"exec --unit {unit_name} -- {cmd}")
-        )
-        assert rc == 0, f"Failed to {description}: {(stdout or stderr).strip()}"
-        return stdout.strip()
+async def bird_container_ip(bird) -> ipaddress.IPv4Address:
+    bird_unit = bird.units[0]
 
     @retry(
         retry=retry_if_exception_type(AssertionError),
@@ -595,8 +614,10 @@ async def bird_container_ip(ops_test, bird) -> ipaddress.IPv4Address:
         wait=wait_fixed(1),
     )
     async def container_ipv4_address() -> ipaddress.IPv4Address:
-        stdout = await exec_on_unit(
-            'sudo lxc list --format=json ubuntu-container | jq -r ".[].state.network.eth0.addresses | .[].address"',
+        _, stdout, _ = await _unit_check_output(
+            bird_unit,
+            "lxc list --format=json ubuntu-container |"
+            'jq -r ".[].state.network.eth0.addresses | .[].address"',
             "get container IP",
         )
         addrs = [ipaddress.ip_address(line) for line in stdout.splitlines()]
@@ -608,12 +629,12 @@ async def bird_container_ip(ops_test, bird) -> ipaddress.IPv4Address:
         return container_ip
 
     for description, cmd in {
-        "enable IP forwarding": "sudo sysctl -w net.ipv4.ip_forward=1",
-        "install jq": "sudo apt install -y jq",
-        "initialize lxd": "sudo lxd init --auto",
-        "launch ubuntu container": "sudo lxc launch ubuntu:22.04 ubuntu-container",
+        "enable IP forwarding": "sysctl -w net.ipv4.ip_forward=1",
+        "install jq": "apt install -y jq",
+        "initialize lxd": "lxd init --auto",
+        "launch ubuntu container": "lxc launch ubuntu:22.04 ubuntu-container",
     }.items():
-        await exec_on_unit(cmd, description)
+        await _unit_check_output(bird_unit, cmd, description)
 
     return await container_ipv4_address()
 
@@ -622,15 +643,7 @@ async def bird_container_ip(ops_test, bird) -> ipaddress.IPv4Address:
 async def external_gateway_pod(ops_test, client, subnet_resource):
     bird_app = ops_test.model.applications[BIRD]
     bird_unit = bird_app.units[0]
-    log.info(f"Getting IP for bird unit {bird_unit.name}")
-    cmd = f"juju show-unit {bird_unit.name}"
-    rc, stdout, stderr = await ops_test.run(*shlex.split(cmd))
-    assert (
-        rc == 0
-    ), f"Failed to get {bird_unit.name} unit data: {(stdout or stderr).strip()}"
-
-    unit_data = yaml.safe_load(stdout)
-    bird_unit_ip = unit_data[bird_unit.name]["public-address"]
+    bird_unit_ip = bird_unit.public_address
 
     # Create subnet, namespace, and pod for external gateway
     log.info("Creating subnet, namespace, and pod for external gateway testing ...")
@@ -665,11 +678,11 @@ def annotate(client, ops_test):
         log.info(
             f"Annotating {type(obj)} {obj.metadata.name} with {annotation_dict} ..."
         )
-        obj.metadata.annotations = annotation_dict
+        patch = {"metadata": {"annotations": annotation_dict}}
         client.patch(
             type(obj),
             obj.metadata.name,
-            obj,
+            patch,
             namespace=obj.metadata.namespace,
             patch_type=patch_type,
         )

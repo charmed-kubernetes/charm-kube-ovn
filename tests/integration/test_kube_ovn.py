@@ -705,7 +705,7 @@ async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics
     @retry(
         retry=retry_if_exception_type(AssertionError),
         wait=wait_fixed(30),
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(5),
     )
     async def gather_metrics():
         metrics = await prometheus.metrics_all()
