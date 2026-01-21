@@ -125,6 +125,7 @@ class KubeOvnCharm(ops.CharmBase):
             "kube-ovn/kube-ovn.yaml",
             "kube-ovn/kube-ovn-app-sa.yaml",
             "kube-ovn/kube-ovn-cni-sa.yaml",
+            "kube-ovn/kube-ovn-pinger.yaml",
             "kube-ovn/kube-ovn-sa.yaml",
         )
         control_plane_node_label = self.model.config["control-plane-node-label"]
@@ -702,6 +703,13 @@ class KubeOvnCharm(ops.CharmBase):
     def set_active_status(self):
         if self.stored.kube_ovn_configured:
             self.unit.status = self.get_workload_status()
+        # Find the image version and set it as the workload version
+        resources = self.load_manifests("kube-ovn/ovn.yaml")
+        ovn_central = self.get_resource(
+            resources, kind="Deployment", name="ovn-central"
+        )
+        img = ovn_central["spec"]["template"]["spec"]["containers"][0]["image"]
+        self.unit.set_workload_version(img.rsplit("v", 1)[-1])
 
     def set_node_selector(self, resource, new_label, replace=None):
         label_key, label_value = new_label.split("=")
@@ -765,7 +773,7 @@ class KubeOvnCharm(ops.CharmBase):
             msg = "Waiting for {} kube-ovn pod{} to start"
             msg = msg.format(len(unready), plural)
             return ops.WaitingStatus(msg)
-        return ops.ActiveStatus()
+        return ops.ActiveStatus("Ready")
 
     def wait_for_kube_ovn_cni(self):
         self.unit.status = ops.WaitingStatus("Waiting for kube-ovn-cni")

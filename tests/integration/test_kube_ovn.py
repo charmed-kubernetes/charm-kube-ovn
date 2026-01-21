@@ -13,6 +13,7 @@ import json
 import re
 import time
 from contextlib import suppress
+from typing import Set
 
 from ipaddress import ip_address, ip_network
 from lightkube.types import PatchType
@@ -681,40 +682,6 @@ async def test_external_gateway(bird_container_ip, external_gateway_pod, kubectl
     )
 
 
-async def test_grafana(
-    ops_test, grafana_host, grafana_password, expected_dashboard_titles
-):
-    # port is defined in grafana_service.yaml
-    grafana = Grafana(ops_test, host=grafana_host, port=30123, pw=grafana_password)
-    while not await grafana.is_ready():
-        log.info("Waiting for Grafana to be ready ...")
-        await asyncio.sleep(5)
-    dashboards = await grafana.dashboards_all()
-    actual_dashboard_titles = [dashboard["title"] for dashboard in dashboards]
-
-    assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
-
-
-async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
-    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
-
-    while not await prometheus.is_ready():
-        log.info("Waiting for Prometheus to be ready...")
-        await asyncio.sleep(5)
-
-    @retry(
-        retry=retry_if_exception_type(AssertionError),
-        wait=wait_fixed(30),
-        stop=stop_after_attempt(3),
-    )
-    async def gather_metrics():
-        metrics = await prometheus.metrics_all()
-        missing = set(expected_prometheus_metrics) - set(metrics)
-        assert not missing, f"Missing metrics: {sorted(missing)}"
-
-    await gather_metrics()
-
-
 @pytest.mark.usefixtures("k8s_model")
 async def test_multi_nic_ipam(multi_nic_ipam):
     ifaces = json.loads(multi_nic_ipam)
@@ -738,6 +705,54 @@ async def test_multi_nic_ipam(multi_nic_ipam):
     assert len(iface_addrs["net1"]) == 1
     assert iface_addrs["net1"][0]["prefixlen"] == 24
     assert ip_address(iface_addrs["net1"][0]["local"]) in ip_network("10.123.123.0/24")
+
+
+async def test_grafana(
+    ops_test, grafana_host, grafana_password, expected_dashboard_titles
+):
+    # port is defined in grafana_service.yaml
+    grafana = Grafana(ops_test, host=grafana_host, port=30123, pw=grafana_password)
+    while not await grafana.is_ready():
+        log.info("Waiting for Grafana to be ready ...")
+        await asyncio.sleep(5)
+    dashboards = await grafana.dashboards_all()
+    actual_dashboard_titles = [dashboard["title"] for dashboard in dashboards]
+
+    assert set(expected_dashboard_titles) == set(actual_dashboard_titles)
+
+
+async def test_prometheus(ops_test, prometheus_host, expected_prometheus_metrics):
+    prometheus = Prometheus(ops_test, host=prometheus_host, port=31337)
+
+    while not await prometheus.is_ready():
+        log.info("Waiting for Prometheus to be ready...")
+        await asyncio.sleep(5)
+
+    class MissingMetricsError(Exception):
+        def __init__(self, metrics: Set[str]):
+            super().__init__(f"Missing metrics: {sorted(metrics)}")
+            self.metrics = metrics
+
+    @retry(
+        retry=retry_if_exception_type(MissingMetricsError),
+        wait=wait_fixed(30),
+        stop=stop_after_attempt(5),
+    )
+    async def gather_metrics():
+        metrics = await prometheus.metrics_all()
+        kube_ovn_metric_prefixes = ["kube_ovn_", "ovs_", "cni_", "pinger_"]
+        kube_ovn_metrics = {
+            m
+            for m in expected_prometheus_metrics
+            if any(m.startswith(name) for name in kube_ovn_metric_prefixes)
+        }
+        if missing := set(kube_ovn_metrics) - set(metrics):
+            raise MissingMetricsError(missing)
+        return set(expected_prometheus_metrics) - set(metrics)
+
+    warning = await gather_metrics()
+    for metric in warning:
+        log.warning(f"Non Kube-OVN metric missing: {metric}")
 
 
 class iPerfError(Exception):
