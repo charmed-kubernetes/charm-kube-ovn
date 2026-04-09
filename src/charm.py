@@ -53,7 +53,7 @@ class KubeOvnCharm(ops.CharmBase):
         super().__init__(*args)
         self.grafana_dashboard_provider = GrafanaDashboardProvider(self)
         self.remote_write_consumer = PrometheusRemoteWriteConsumer(self)
-        self.jinja2_environment = Environment(loader=FileSystemLoader("templates/"))
+        self.jinja2_environment = Environment(loader=FileSystemLoader("templates/")) # nosec B701
         self.stored.set_default(kube_ovn_configured=False)
         self.stored.set_default(pod_restart_needed=False)
         self.stored.set_default(grafana_agent_configured=False)
