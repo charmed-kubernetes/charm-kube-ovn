@@ -52,7 +52,7 @@ metadata:
 spec:
   containers:
       - name: nginx
-        image: rocks.canonical.com/cdk/kubeovn/perf:latest
+        image: ghcr.io/canonical/cdk/kubeovn/perf:latest
 ---
 apiVersion: v1
 kind: Pod
@@ -64,4 +64,4 @@ metadata:
 spec:
   containers:
       - name: nginx
-        image: rocks.canonical.com/cdk/kubeovn/perf:latest
+        image: ghcr.io/canonical/cdk/kubeovn/perf:latest
