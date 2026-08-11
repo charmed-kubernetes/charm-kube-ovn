@@ -35,5 +35,5 @@ metadata:
 spec:
   containers:
   - name: ubuntu
-    image: rocks.canonical.com/cdk/ubuntu:focal
+    image: ghcr.io/canonical/cdk/ubuntu:focal
     command: ["sleep", "inf"]

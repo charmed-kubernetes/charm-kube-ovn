@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: rocks.canonical.com/cdk/nginx:1.18
+        image: ghcr.io/canonical/cdk/nginx:1.18
         ports:
         - containerPort: 80
 ---
@@ -46,7 +46,7 @@ metadata:
     access: 'yes'
 spec:
   containers:
-  - image: rocks.canonical.com/cdk/busybox:1.32
+  - image: ghcr.io/canonical/cdk/busybox:1.32
     name: 'allowed-pod'
     command:
       - sleep
@@ -61,7 +61,7 @@ metadata:
     access: 'no'
 spec:
   containers:
-  - image: rocks.canonical.com/cdk/busybox:1.32
+  - image: ghcr.io/canonical/cdk/busybox:1.32
     name: 'blocked-pod'
     command:
       - sleep
