@@ -154,8 +154,7 @@ def test_replace_images(harness, charm):
     charm.replace_images(resources, DEFAULT_IMAGE_REGISTRY)
     pod_spec = resources[0]["spec"]["template"]["spec"]
     assert (
-        pod_spec["containers"][0]["image"]
-        == "ghcr.io/canonical/cdk/cool/image:latest"
+        pod_spec["containers"][0]["image"] == "ghcr.io/canonical/cdk/cool/image:latest"
     )
     assert (
         pod_spec["initContainers"][0]["image"]
