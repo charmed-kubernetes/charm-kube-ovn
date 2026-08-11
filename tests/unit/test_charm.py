@@ -25,7 +25,7 @@ from charm import SpeakerConfig
 
 ops.testing.SIMULATE_CAN_CONNECT = True
 DEFAULT_SERVICE_CIDR = "10.152.183.0/24"
-DEFAULT_IMAGE_REGISTRY = "rocks.canonical.com:443/cdk"
+DEFAULT_IMAGE_REGISTRY = "ghcr.io/canonical/cdk"
 
 
 @pytest.fixture
@@ -154,12 +154,11 @@ def test_replace_images(harness, charm):
     charm.replace_images(resources, DEFAULT_IMAGE_REGISTRY)
     pod_spec = resources[0]["spec"]["template"]["spec"]
     assert (
-        pod_spec["containers"][0]["image"]
-        == "rocks.canonical.com:443/cdk/cool/image:latest"
+        pod_spec["containers"][0]["image"] == "ghcr.io/canonical/cdk/cool/image:latest"
     )
     assert (
         pod_spec["initContainers"][0]["image"]
-        == "rocks.canonical.com:443/cdk/cooler/image:latest"
+        == "ghcr.io/canonical/cdk/cooler/image:latest"
     )
 
 
@@ -653,14 +652,14 @@ def test_install_kubectl_plugin(
     mock_path, mock_chmod, mock_get_registry, mock_get_resource, charm
 ):
     plugin_name = "test_plugin"
-    mock_get_registry.return_value = "rocks.canonical.com:443/cdk"
+    mock_get_registry.return_value = "ghcr.io/canonical/cdk"
     mock_get_resource.return_value.read_text.return_value = 'REGISTRY="kubeovn"'
     mock_plugin_path = mock_path("/usr/local/bin") / plugin_name
 
     charm.install_kubectl_plugin(plugin_name)
 
     mock_plugin_path.write_text.assert_called_once_with(
-        'REGISTRY="rocks.canonical.com:443/cdk/kubeovn"'
+        'REGISTRY="ghcr.io/canonical/cdk/kubeovn"'
     )
     mock_chmod.assert_called_once_with(mock_plugin_path, 0o755)
 
@@ -688,7 +687,7 @@ def test_install_kubectl_plugin(
 def test_install_kubectl_plugin_raises(
     mock_get_registry, mock_get_resource, path, exception, log_message, charm, caplog
 ):
-    mock_get_registry.return_value = "rocks.canonical.com:443/cdk"
+    mock_get_registry.return_value = "ghcr.io/canonical/cdk"
     mock_get_resource.side_effect = exception
     mock_get_resource.return_value = path
 
