@@ -26,7 +26,6 @@ from tenacity import (
     wait_fixed,
 )
 
-
 log = logging.getLogger(__name__)
 GRAFANA, PROMETHEUS = "grafana-k8s", "prometheus-k8s"
 COS_MODEL = {"multus": "edge", GRAFANA: "1/stable", PROMETHEUS: "1/stable"}

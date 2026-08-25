@@ -2,7 +2,7 @@
 set -euxo pipefail
 
 # Update kube-ovn to the latest version. This script will:
-# 1. Sync the kube-ovn container image to rocks.canonical.com
+# 1. Sync the kube-ovn container image to ghcr.io/canonical/cdk
 # 2. Update manifests in templates/kube-ovn
 # 3. Update plugins/kubectl-ko
 
@@ -14,7 +14,7 @@ cat << EOF > regsync.yaml
 sync:
 - type: image
   source: $image
-  target: upload.rocks.canonical.com:5000/cdk/$image
+  target: ghcr.io/canonical/cdk/$image
 EOF
 regsync once -c regsync.yaml
 rm regsync.yaml

@@ -31,4 +31,4 @@ metadata:
 spec:
   containers:
   - name: perf-client
-    image: rocks.canonical.com/cdk/kubeovn/perf:latest
+    image: ghcr.io/canonical/cdk/kubeovn/perf:latest
